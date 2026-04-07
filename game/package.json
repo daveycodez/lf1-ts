@@ -1,0 +1,20 @@
+{
+	"name": "lf1-port",
+	"version": "1.0.0",
+	"type": "module",
+	"private": true,
+	"scripts": {
+		"convert-assets": "bun run tools/convert-grh.ts",
+		"dev": "bunx vite",
+		"build": "bunx vite build",
+		"preview": "bunx vite preview"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"vite": "^6",
+		"typescript": "^5"
+	},
+	"dependencies": {
+		"pngjs": "^7.0.0"
+	}
+}
