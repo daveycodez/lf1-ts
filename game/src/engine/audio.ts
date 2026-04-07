@@ -22,14 +22,21 @@ export class Audio {
 		}
 	}
 
-	play(name: string): void {
+	play(name: string, volume = 1.0): void {
 		if (this.muted) return;
 		const buffer = this.sounds.get(name);
 		if (!buffer) return;
 		const ctx = this.getCtx();
 		const source = ctx.createBufferSource();
 		source.buffer = buffer;
-		source.connect(ctx.destination);
+		if (volume < 1.0) {
+			const gain = ctx.createGain();
+			gain.gain.value = volume;
+			source.connect(gain);
+			gain.connect(ctx.destination);
+		} else {
+			source.connect(ctx.destination);
+		}
 		source.start();
 	}
 

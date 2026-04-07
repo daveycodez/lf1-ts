@@ -8,7 +8,7 @@
  *   FUN_1520_04d0 = init_title_resources (tile background)
  *   FUN_1520_079c = title animation (palette cycling)
  *   FUN_1520_0206 = blit CWORD region (getm + addput)
- *   FUN_1520_0054 = new_words display
+ *   FUN_1520_0054 = play_sound (b?.wav: B1=join, B2=confirm, B3=navigate)
  *   FUN_1520_0c8e = SetMode
  *   FUN_1520_12e6 = ChooseGroup
  */
@@ -93,7 +93,17 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 
 	return new Promise((resolve) => {
 		if (_cancelPrevious) _cancelPrevious();
-		const { renderer, input, assets, timer } = ctx;
+		const { renderer, input, audio, assets, timer } = ctx;
+
+		// Port of FUN_1520_0054 — sound files: b?.wav (B1, B2, B3)
+		// Volume: (param_2 * 3) / 5, normalized to 0.0–1.0
+		const DAT_0189 = 3;
+		function playAudio(param_1: number, param_2: number) {
+			if (param_1 <= DAT_0189) {
+				const vol = (param_2 * 3) / 5 / 25;
+				audio.play(`B${param_1}`, vol);
+			}
+		}
 
 		// ── Decompiled state variables ──
 		let DAT_0131 = 1; // menu selection
@@ -231,12 +241,14 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 
 			// Line 7193: if local_3 == DAT_017d || DAT_017e || DAT_017f (down)
 			if (isDownKey(local_3)) {
+				playAudio(3, 0x19);
 				DAT_0131 = DAT_0131 + 1;
 				if (DAT_0131 > 3) DAT_0131 = 1;
 			}
 
 			// Line 7200: if local_3 == DAT_0171 || DAT_0172 || DAT_0173 (up)
 			if (isUpKey(local_3)) {
+				playAudio(3, 0x19);
 				DAT_0131 = DAT_0131 - 1;
 				if (DAT_0131 < 1) DAT_0131 = 3;
 			}
@@ -244,6 +256,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			// Line 7207: if local_3 == '\r' || DAT_0181 || DAT_0182 || DAT_0183
 			if (isConfirmKey(local_3)) {
 				if (DAT_0131 === 1) {
+					playAudio(2, 0x19);
 					state = "mode";
 					DAT_00d8 = 1;
 					DAT_00da = 2;
@@ -253,11 +266,11 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					return;
 				}
 				if (DAT_0131 === 2) {
-					// Versus → toggle DAT_00e4 between 0 and 5
+					playAudio(1, 0x19);
 					DAT_00e4 = 5 - DAT_00e4;
 				}
 				if (DAT_0131 === 3) {
-					// Quit
+					playAudio(2, 0x19);
 					DAT_00e6 = 1;
 					done = true;
 					resolve(EXIT_QUIT);
@@ -471,6 +484,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			if (k === 0) return;
 
 			if (isConfirmKey(k)) {
+				playAudio(2, 0x19);
 				totalSlots = DAT_00da;
 				contestMode = DAT_00e0 === 2;
 				initCharSel();
@@ -486,17 +500,20 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			// DS offsets: 0x171=UP, 0x175=LEFT, 0x179=RIGHT, 0x17d=DOWN
 			for (let p = 0; p < 3; p++) {
 				if (DAT_00d8 === 1) {
-					// Fighter count (horizontal): LEFT/RIGHT to change, UP/DOWN to switch category
 					if (KEYS.LEFT[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00da -= 1;
 					}
 					if (KEYS.RIGHT[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00da += 1;
 					}
 					if (KEYS.UP[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00d8 = 3;
 					}
 					if (KEYS.DOWN[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00de = 1;
 						DAT_00dc = 2;
 						DAT_00d8 = 2;
@@ -504,8 +521,8 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					if (DAT_00da < 2) DAT_00da = 8;
 					if (DAT_00da > 8) DAT_00da = 2;
 				} else if (DAT_00d8 === 2) {
-					// Game mode (vertical): UP/DOWN to change, wraps to adjacent category
 					if (KEYS.UP[p] === k) {
+						playAudio(3, 0x19);
 						const v = DAT_00de - 1;
 						if (v < 4) {
 							DAT_00dc = 2;
@@ -516,6 +533,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 						}
 					}
 					if (KEYS.DOWN[p] === k) {
+						playAudio(3, 0x19);
 						const v = DAT_00de + 1;
 						if (v < 4) {
 							DAT_00dc = 2;
@@ -528,16 +546,18 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					if (DAT_00de < 1) DAT_00d8 = 1;
 					if (DAT_00de > 5) DAT_00d8 = 3;
 				} else if (DAT_00d8 === 3) {
-					// Contest type (horizontal): LEFT/RIGHT to toggle, UP/DOWN to switch category
 					if (KEYS.LEFT[p] === k || KEYS.RIGHT[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00e0 = 3 - DAT_00e0;
 					}
 					if (KEYS.UP[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00de = 5;
 						DAT_00dc = 4;
 						DAT_00d8 = 2;
 					}
 					if (KEYS.DOWN[p] === k) {
+						playAudio(3, 0x19);
 						DAT_00d8 = 1;
 					}
 				}
@@ -731,11 +751,13 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			for (let p = 0; p < 3; p++) {
 				// ATTACK: state 2 confirm (line 7376)
 				if (KEYS.ATTACK[p] === local_13 && playerState[p] === 2) {
+					playAudio(2, 0x19);
 					playerState[p] = 3;
 					groupCount[playerGroup[p]]++;
 				}
 				// ATTACK: state 1 confirm (line 7382)
 				if (KEYS.ATTACK[p] === local_13 && playerState[p] === 1) {
+					playAudio(2, 0x19);
 					playerState[p] = 2;
 					if (DAT_00d8 !== 2) {
 						playerState[p] = 3;
@@ -751,6 +773,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					playerState[p] === 0 &&
 					charSelJoinCount < charSelMaxSlots
 				) {
+					playAudio(1, 0x19);
 					playerState[p] = 1;
 					charSelAnyJoined = true;
 					charSelJoinCount++;
@@ -759,6 +782,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 
 				// LEFT (DS:0x175): prev character (state 1, line 7401)
 				if (KEYS.LEFT[p] === local_13 && playerState[p] === 1) {
+					playAudio(3, 0x19);
 					do {
 						playerChar[p]--;
 						if (playerChar[p] < 1) playerChar[p] = MAX_CHARS;
@@ -766,6 +790,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 				}
 				// RIGHT (DS:0x179): next character (state 1, line 7419)
 				if (KEYS.RIGHT[p] === local_13 && playerState[p] === 1) {
+					playAudio(3, 0x19);
 					do {
 						playerChar[p]++;
 						if (playerChar[p] > MAX_CHARS) playerChar[p] = 1;
@@ -774,6 +799,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 
 				// UP (DS:0x171): prev group (state 2, line 7437)
 				if (KEYS.UP[p] === local_13 && playerState[p] === 2) {
+					playAudio(3, 0x19);
 					do {
 						playerGroup[p]--;
 						if (playerGroup[p] < 1) playerGroup[p] = 4;
@@ -781,6 +807,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 				}
 				// DOWN (DS:0x17d): next group (state 2, line 7451)
 				if (KEYS.DOWN[p] === local_13 && playerState[p] === 2) {
+					playAudio(3, 0x19);
 					do {
 						playerGroup[p]++;
 						if (playerGroup[p] > 4) playerGroup[p] = 1;
