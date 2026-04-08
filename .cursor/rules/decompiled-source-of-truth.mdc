@@ -1,0 +1,14 @@
+---
+description: Decompiled C is the source of truth for all game logic
+alwaysApply: true
+---
+
+# Decompiled C is the Source of Truth
+
+When fixing bugs or implementing features in the game port:
+
+1. **ALWAYS** read the decompiled C code FIRST (`game/tools/start_decompiled.c`, `game/tools/fight_decompiled.c`)
+2. **NEVER** use the TypeScript files (`.ts`) as reference for how something "should" work
+3. The `.ts` files are the PORT — they may contain bugs. The decompiled C is the ORIGINAL.
+4. Trace the exact logic from the decompiled C, then make the TypeScript match it 1-for-1.
+5. Do NOT be creative. Do NOT make assumptions. Do NOT invent logic. Copy from the decompiled C.

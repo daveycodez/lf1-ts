@@ -254,22 +254,27 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	const { renderer, input, audio, assets, timer } = ctx;
 
 	// ── Color replacement for per-fighter sprite recoloring ──
-	// Base ACT1 sprite uses palette band 151-159 (neutral purple tones).
-	// In the original, DAT_0096 = fighter*10 shifts into the fighter's palette band.
-	// Since we can't do VGA palette tricks, we do pixel-level color replacement.
-	// User-verified base sprite color → body part mapping:
-	const BASE_MAP: { rgb: [number, number, number]; part: string }[] = [
-		{ rgb: [56, 69, 113], part: "s1" }, // #384571 → skin1
-		{ rgb: [81, 81, 113], part: "s2" }, // #515171 → skin2
-		{ rgb: [89, 81, 113], part: "h1" }, // #595171 → shirt1
-		{ rgb: [97, 81, 113], part: "h2" }, // #615171 → shirt2
-		{ rgb: [105, 81, 113], part: "t1" }, // #695171 → pants1
-		{ rgb: [113, 81, 113], part: "t2" }, // #715171 → pants2
-		{ rgb: [113, 81, 105], part: "ew" }, // #715169 → eye white
-		{ rgb: [113, 81, 97], part: "mr" }, // #715161 → mouth red
-		{ rgb: [113, 81, 89], part: "ol" }, // #715159 → outline
-		{ rgb: [113, 81, 81], part: "hr" }, // #715151 → hair (per-character)
+	// From decompiled start_decompiled.c line 7018-7036:
+	// Base sprite uses VGA palette indices 151-159 (register = param_3*10 + local_6 - 0x69).
+	// Hair at index 160 (register = param_3*10 - 0x60).
+	// The 9 body parts map to palette entries 151..159 in order:
+	//   [skin1, skin2, shirt1, shirt2, trouser1, trouser2, eye_white, mouth_red, outline]
+	// Hair at palette entry 160.
+	// BASE_MAP is computed from the PAL file at these exact indices (deferred until palette loaded).
+	const BASE_PARTS = [
+		"s1",
+		"s2",
+		"h1",
+		"h2",
+		"t1",
+		"t2",
+		"ew",
+		"mr",
+		"ol",
+		"hr",
 	];
+	const BASE_PAL_INDICES = [151, 152, 153, 154, 155, 156, 157, 158, 159, 160];
+	let BASE_MAP: { rgb: [number, number, number]; part: string }[] = [];
 
 	function getCharColors(
 		charIdx: number,
@@ -409,6 +414,12 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		}
 	}
 
+	// Build BASE_MAP from the palette at the exact VGA indices (line 7023)
+	BASE_MAP = BASE_PAL_INDICES.map((palIdx, i) => ({
+		rgb: gamePalette![palIdx] as [number, number, number],
+		part: BASE_PARTS[i],
+	}));
+
 	// Extract hair color per character from HEAD.GRH top rows
 	const hairColors: [number, number, number][] = [];
 	{
@@ -494,10 +505,25 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		return MP_COLOR_LOWEST;
 	}
 
-	const humanPlayers = ctx.shared.humanPlayers ?? 1;
-	const totalSlots = ctx.shared.totalSlots ?? 2;
-	const selections: number[] = ctx.shared.selections ?? [0, 1];
-	const playerIndices: number[] = ctx.shared.playerIndices ?? [0];
+	const slotActive: boolean[] = ctx.shared.slotActive ?? [
+		true,
+		true,
+		false,
+		false,
+		false,
+		false,
+		false,
+		false,
+	];
+	const slotController: number[] = ctx.shared.slotController ?? [
+		0, 5, 5, 5, 5, 5, 5, 5,
+	];
+	const slotChar: number[] = ctx.shared.slotChar ?? [
+		0, 1, -1, -1, -1, -1, -1, -1,
+	];
+	const slotTeam: number[] = ctx.shared.slotTeam ?? [1, 2, 0, 0, 0, 0, 0, 0];
+	const slotX: number[] = ctx.shared.slotX ?? [0x28, 0xd8, 0, 0, 0, 0, 0, 0];
+	const slotY: number[] = ctx.shared.slotY ?? [0x46, 0x46, 0, 0, 0, 0, 0, 0];
 
 	// Per-character tactic table (from char_id * 0x12 + 0x2f1a)
 	// [walkType, moveType, attackRange, specialId, specialRange, bounceDiv]
@@ -538,6 +564,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	// FUN_25f1_1562: Round init (line 18030)
 	// ══════════════════════════════════════════════════════════
+	// Palette table at FIGHT.EXE DS:0x165 (8 entries, one per unique team)
+	const PALETTE_TABLE = [1, 16, 31, 46, 65, 108, 126, 144];
+
 	function initRound() {
 		tickCount = 0; // DAT_3463_49b6 = 0
 		scrollX = 0; // DAT_3463_46e1 = 0
@@ -548,6 +577,24 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			soundQueue[i] = 0;
 			slots[i].f6 = 0;
 			if (i >= 8) slots[i].f2 = 0;
+		}
+
+		// Team→palette assignment (line 18050-18069)
+		// Each unique team gets the next entry from PALETTE_TABLE.
+		// Teammates share the same v3e. The last fighter loaded per-band
+		// determines the band's character colors (VGA palette overwrite).
+		let paletteCounter = 0;
+		const teamPalLookup = new Int16Array(300);
+		for (let i = 0; i < MAX_FIGHTERS; i++) {
+			if (slots[i].f2 !== 1) continue;
+			const team = hud[i].v3c;
+			if (teamPalLookup[team] === 0) {
+				teamPalLookup[team] = PALETTE_TABLE[paletteCounter] ?? 1;
+				hud[i].v3e = PALETTE_TABLE[paletteCounter] ?? 1;
+				paletteCounter++;
+			} else {
+				hud[i].v3e = teamPalLookup[team];
+			}
 		}
 
 		// Reset fighter state for active slots (line 18158-18226)
@@ -1512,8 +1559,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 					const facing = i16(s.v02);
 					const numX = s.fc - 2 + facing * -2 - scrollX;
 					const numY = s.fe + s.v00 - 0x1f;
-					// Per-fighter color from FIGHT.EXE 0x165 table:
-					// [1,16,31,46,65,108,126,144] → pal[value] from PAL file
+					// Color from v3e palette assignment (line 18318: DAT_0096 = v3e - 0xF)
+					// v3e values [1,16,31,46,65,108,126,144] map 1:1 to these colors
 					const FIGHTER_COLORS = [
 						"#0000ff",
 						"#00ff00",
@@ -1524,7 +1571,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 						"#827959",
 						"#fb6d8e",
 					];
-					const tint = FIGHTER_COLORS[idx % FIGHTER_COLORS.length];
+					const palIdx = PALETTE_TABLE.indexOf(hud[idx]?.v3e ?? 0);
+					const tint =
+						FIGHTER_COLORS[palIdx >= 0 ? palIdx : idx % FIGHTER_COLORS.length];
 					recolorCtx.clearRect(0, 0, ACT_SPR, ACT_SPR);
 					recolorCtx.drawImage(fontsImg, fsx, fsy, 5, 7, 0, 0, 5, 7);
 					recolorCtx.globalCompositeOperation = "source-in";
@@ -1689,27 +1738,28 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	}
 
 	// ══════════════════════════════════════════════════════════
-	// Setup: spawn fighters from selections
+	// Setup: spawn fighters from pre-computed slot arrays
 	// ══════════════════════════════════════════════════════════
 	stageIdx = Math.floor(Math.random() * BG_PAIRS.length);
 
-	for (let i = 0; i < totalSlots && i < MAX_FIGHTERS; i++) {
-		const charId = selections[i] ?? 0;
-		// Spawn positions spread across stage (line 17896-17905)
-		const x = Math.floor(
-			40 + (i / Math.max(1, totalSlots - 1)) * (SCREEN_W - 80),
-		);
-		// From decompiled line 17910: fe = Y_MAX - initial_offset (small offset)
-		const y = getYMax(stageIdx) - i * 3;
-		initFighter(i, charId, x, y);
+	for (let i = 0; i < MAX_FIGHTERS; i++) {
+		if (!slotActive[i]) continue;
+		const charId = slotChar[i] >= 0 ? slotChar[i] : 0;
 
-		// v04 = player controller index (0-2 for humans, 5 for CPU)
-		// From shared data row 2 (line 17885-17886): 0x117[slot]
-		// Used for: key lookup, number display (v04+'1'), AI detection
-		slots[i].v04 = i < playerIndices.length ? playerIndices[i] : 5;
+		// X position: FIGHT adds +0x40 to raw X from START (line 17898)
+		const fx = slotX[i] + 0x40;
+		// Y position: stage-relative adjustment (line 17906-17915)
+		const rawY = slotY[i];
+		let fy: number;
+		if (rawY < 0x65) {
+			fy = getYMax(stageIdx) - rawY;
+		} else {
+			fy = getYMin(stageIdx) + rawY;
+		}
 
-		// Team assignment
-		hud[i].v3c = i < Math.ceil(totalSlots / 2) ? 0 : 1;
+		initFighter(i, charId, fx, fy);
+		slots[i].v04 = slotController[i];
+		hud[i].v3c = slotTeam[i];
 		hud[i].v42 = Math.floor(slots[i].v1a / 5);
 		hud[i].v44 = Math.floor(slots[i].v1e / 5);
 	}

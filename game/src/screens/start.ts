@@ -124,6 +124,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 		type State = "title" | "mode" | "charsel" | "superinfo" | "vsscreen";
 		let state: State = "title";
 		let selections: number[] = [];
+		let vsControllers: number[] = [];
 		let vsTickDelay = 0;
 		let totalSlots = 2;
 		let contestMode = false;
@@ -720,35 +721,207 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 				return;
 			}
 			if (charSelExitCountdown === 0) {
-				selections = [];
-				const playerIndices: number[] = [];
-				for (let p = 0; p < 3; p++) {
-					if (playerState[p] === 3) {
-						selections.push(playerChar[p] - 1);
-						playerIndices.push(p);
+				// Pre-init all 8 slots (line 8572-8577)
+				const slotActive = [
+					false,
+					false,
+					false,
+					false,
+					false,
+					false,
+					false,
+					false,
+				];
+				const slotController = [5, 5, 5, 5, 5, 5, 5, 5];
+				const slotChar = [-1, -1, -1, -1, -1, -1, -1, -1];
+				const slotTeam = [0, 0, 0, 0, 0, 0, 0, 0];
+				const slotX = [0, 0, 0, 0, 0, 0, 0, 0];
+				const slotY = [0, 0, 0, 0, 0, 0, 0, 0];
+
+				// Dispatch to mode-specific setup (line 8578-8597)
+				if (DAT_00d8 === 1) {
+					// FUN_1520_214c: Solo mode
+					for (let i = 0; i < 8; i++) {
+						if (i < DAT_00da) slotActive[i] = true;
+						slotTeam[i] = i + 1;
 					}
-				}
-				// Fill empty slots with unique random characters (line 8642-8659)
-				while (selections.length < totalSlots) {
-					let charId: number;
-					let unique: boolean;
-					do {
-						unique = true;
-						charId = Math.floor(Math.random() * MAX_CHARS);
-						for (let j = 0; j < selections.length; j++) {
-							if (selections[j] === charId) {
-								unique = false;
-								break;
+					let nextSlot = 0;
+					for (let p = 0; p < 3; p++) {
+						if (playerState[p] === 3) {
+							slotController[nextSlot] = p;
+							slotChar[nextSlot] = playerChar[p] - 1;
+							nextSlot++;
+						}
+					}
+					for (let i = 0; i < 8; i++) {
+						slotX[i] = Math.floor(Math.random() * 200) + 60;
+						slotY[i] = Math.floor(Math.random() * 20) + 0x3c;
+					}
+				} else if (DAT_00d8 === 2) {
+					if (DAT_00de === 1) {
+						// FUN_1520_2216: 2v2
+						for (let i = 0; i < 4; i++) {
+							slotActive[i] = true;
+							slotTeam[i] = i < 2 ? 1 : 2;
+						}
+						const tc = [0, 0, 2];
+						for (let p = 0; p < 3; p++) {
+							if (playerState[p] === 3) {
+								const g = playerGroup[p];
+								slotController[tc[g]] = p;
+								slotChar[tc[g]] = playerChar[p] - 1;
+								tc[g]++;
 							}
 						}
-					} while (!unique);
-					selections.push(charId);
+						for (let i = 0; i < 4; i++) {
+							slotX[i] = i < 2 ? 0x28 : 0xd8;
+							slotY[i] = (i % 4) * 0x14 + 0x46;
+						}
+					} else if (DAT_00de === 2) {
+						// FUN_1520_2313: 3v3
+						for (let i = 0; i < 8; i++) {
+							slotActive[i] = true;
+							slotTeam[i] = i < 4 ? 1 : 2;
+						}
+						slotActive[3] = false;
+						slotActive[7] = false;
+						const tc = [0, 0, 4];
+						for (let p = 0; p < 3; p++) {
+							if (playerState[p] === 3) {
+								const g = playerGroup[p];
+								slotController[tc[g]] = p;
+								slotChar[tc[g]] = playerChar[p] - 1;
+								tc[g]++;
+							}
+						}
+						for (let i = 0; i < 8; i++) {
+							slotX[i] = i < 4 ? 0x28 : 0xd8;
+							slotY[i] = (i % 4) * 0x14 + 0x46;
+						}
+					} else if (DAT_00de === 3) {
+						// FUN_1520_241c: 4v4
+						for (let i = 0; i < 8; i++) {
+							slotActive[i] = true;
+							slotTeam[i] = i < 4 ? 1 : 2;
+						}
+						const tc = [0, 0, 4];
+						for (let p = 0; p < 3; p++) {
+							if (playerState[p] === 3) {
+								const g = playerGroup[p];
+								slotController[tc[g]] = p;
+								slotChar[tc[g]] = playerChar[p] - 1;
+								tc[g]++;
+							}
+						}
+						for (let i = 0; i < 8; i++) {
+							slotX[i] = i < 4 ? 0x28 : 0xd8;
+							slotY[i] = (i % 4) * 0x14 + 0x46;
+						}
+					} else if (DAT_00de === 4) {
+						// FUN_1520_2519: 3-team
+						for (let i = 0; i < 8; i++) {
+							slotActive[i] = i < 6;
+						}
+						for (let i = 0; i < 6; i++) {
+							slotTeam[i] = Math.floor(i / 2) + 1;
+						}
+						const tc = [0, 0, 2, 4];
+						for (let p = 0; p < 3; p++) {
+							if (playerState[p] === 3) {
+								const g = playerGroup[p];
+								slotController[tc[g]] = p;
+								slotChar[tc[g]] = playerChar[p] - 1;
+								tc[g]++;
+							}
+						}
+						slotX[0] = 0x23;
+						slotY[0] = 0x5a;
+						slotX[1] = 0x2d;
+						slotY[1] = 0x55;
+						slotX[2] = 0xdd;
+						slotY[2] = 0x5a;
+						slotX[3] = 0xd3;
+						slotY[3] = 0x55;
+						slotX[4] = 0xa0;
+						slotY[4] = 0x6e;
+						slotX[5] = 0xa0;
+						slotY[5] = 0x73;
+					} else if (DAT_00de === 5) {
+						// FUN_1520_262b: 4-team
+						for (let i = 0; i < 8; i++) {
+							slotActive[i] = true;
+							slotTeam[i] = Math.floor(i / 2) + 1;
+						}
+						const tc = [0, 0, 2, 4, 6];
+						for (let p = 0; p < 3; p++) {
+							if (playerState[p] === 3) {
+								const g = playerGroup[p];
+								slotController[tc[g]] = p;
+								slotChar[tc[g]] = playerChar[p] - 1;
+								tc[g]++;
+							}
+						}
+						slotX[0] = 0x23;
+						slotY[0] = 0x5a;
+						slotX[1] = 0x2d;
+						slotY[1] = 0x55;
+						slotX[2] = 0xdd;
+						slotY[2] = 0x5a;
+						slotX[3] = 0xd3;
+						slotY[3] = 0x55;
+						slotX[4] = 0x23;
+						slotY[4] = 0x6e;
+						slotX[5] = 0x2d;
+						slotY[5] = 0x73;
+						slotX[6] = 0xdd;
+						slotY[6] = 0x6e;
+						slotX[7] = 0xd3;
+						slotY[7] = 0x73;
+					}
 				}
+
+				// Random fill ALL empty slots (line 8642-8659)
+				// Original fills ALL 8 slots where DAT_2cca[i]==0, not just active ones
+				for (let i = 0; i < 8; i++) {
+					if (slotChar[i] === -1) {
+						let cid: number;
+						let unique: boolean;
+						do {
+							unique = true;
+							cid = Math.floor(Math.random() * MAX_CHARS);
+							for (let j = 0; j < 8; j++) {
+								if (slotChar[j] === cid) {
+									unique = false;
+									break;
+								}
+							}
+						} while (!unique);
+						slotChar[i] = cid;
+					}
+				}
+
+				// Build flat arrays for VS screen
+				selections = [];
+				vsControllers = [];
+				for (let i = 0; i < 8; i++) {
+					if (slotActive[i]) {
+						selections.push(slotChar[i]);
+						vsControllers.push(slotController[i]);
+					}
+				}
+				totalSlots = selections.length;
+
+				ctx.shared.slotActive = slotActive;
+				ctx.shared.slotController = slotController;
+				ctx.shared.slotChar = slotChar;
+				ctx.shared.slotTeam = slotTeam;
+				ctx.shared.slotX = slotX;
+				ctx.shared.slotY = slotY;
+				ctx.shared.gameMode = DAT_00d8;
+				ctx.shared.subMode = DAT_00de;
 				ctx.shared.selections = selections;
-				ctx.shared.playerIndices = playerIndices;
-				ctx.shared.humanPlayers = charSelJoinCount;
 				ctx.shared.totalSlots = totalSlots;
-				// Go to VS screen before fight (FUN_1520_2944)
+
 				playAudio(2, 0x19);
 				vsTickDelay = 10;
 				state = "vsscreen";
@@ -913,12 +1086,13 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 				if (playerState[p] === 1 && faceImg) {
 					const ch = ctx.characters[playerChar[p] - 1];
 					if (ch) {
+						const cfi = (ch.faceCol - 1) * 6 + ch.faceRow;
 						renderer.drawImage(
 							faceImg,
-							(ch.faceRow - 1) * 50,
-							(ch.faceCol - 1) * 50,
-							50,
-							50,
+							((cfi - 1) % 6) * 0x32,
+							Math.floor((cfi - 1) / 6) * 0x32,
+							0x32,
+							0x32,
 							px + 0x35,
 							0x23,
 						);
@@ -1055,7 +1229,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			}
 		}
 
-		// FUN_1520_2944: VS screen — exact port from binary tables (line 8175-8399)
+		// FUN_1520_2944: VS screen — exact port (line 8175-8399)
 		// Layout tables extracted from START.EXE at 0x1d1/0x1df/0x1ed/0x1fb
 		const VS_TOP_ROW: Record<number, number> = {
 			2: 2,
@@ -1076,60 +1250,77 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			8: 36,
 		};
 		const VS_BOT_Y: Record<number, number> = { 5: 106, 6: 106, 7: 106, 8: 106 };
+
+		function drawBorder(
+			cwImg: HTMLImageElement,
+			p1: number,
+			p2: number,
+			p3: number,
+			p4: number,
+		) {
+			const mY = Math.floor((p4 + p3 + 0x46) / 2) - 0x46;
+			renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, mY);
+			renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, mY);
+			renderer.drawImage(cwImg, 0xa0, 0x78, 0x96, 0x46, p1, p3);
+			renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, p4 - 0x46);
+			renderer.drawImage(cwImg, 0xaa, 0x78, 0x96, 0x46, p2 - 0x96, p3);
+			renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, p4 - 0x46);
+		}
+
+		function drawFace(
+			faceImg: HTMLImageElement,
+			charId: number,
+			dx: number,
+			dy: number,
+		) {
+			const ch = ctx.characters[charId];
+			if (!ch) return;
+			const fi = (ch.faceCol - 1) * 6 + ch.faceRow;
+			renderer.drawImage(
+				faceImg,
+				((fi - 1) % 6) * 0x32,
+				Math.floor((fi - 1) / 6) * 0x32,
+				0x32,
+				0x32,
+				dx,
+				dy,
+			);
+		}
+
 		function renderVsScreen() {
 			renderTileBackground();
 			const faceImg = assets.getImage("FACE");
 			const cwImg = assets.getImage("CWORD");
-			const dimImg = assets.getImage("CWORD_DIM");
-			if (!faceImg) return;
-			const n = Math.min(Math.max(totalSlots, 2), 8);
-			const pIndices: number[] = ctx.shared.playerIndices ?? [];
-			const topN = VS_TOP_ROW[n] ?? 2;
-			const botN = n - topN;
-			const topY = VS_TOP_Y[n] ?? 75;
-			const topSp = Math.floor((320 - topN * 50) / (topN + 1));
+			if (!faceImg || !cwImg) return;
 
-			// FUN_1520_2744(p1=left, p2=right, p3=top, p4=bottom) line 8147-8171
-			// Called at line 8219: (topSp/2, 320-topSp/2, topY-8, local_a)
-			// local_a = botYBase + 0x47
-			if (cwImg) {
-				const p1 = Math.floor(topSp / 2);
-				const p2 = 0x140 - p1;
-				const p3 = topY - 8;
-				const p4 = botN > 0 ? (VS_BOT_Y[n] ?? 106) + 0x47 : topY + 0x47;
-				const mY = Math.floor((p4 + p3 + 0x46) / 2) - 0x46;
-				renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, mY);
-				renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, mY);
-				renderer.drawImage(cwImg, 0xa0, 0x78, 0x96, 0x46, p1, p3);
-				renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, p4 - 0x46);
-				renderer.drawImage(cwImg, 0xaa, 0x78, 0x96, 0x46, p2 - 0x96, p3);
-				renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, p4 - 0x46);
-			}
+			const sc = ctx.shared.slotChar as number[] | undefined;
 
-			// "VS" label from CWORD (line 8220)
-			if (cwImg) {
-				renderer.drawImage(cwImg, 0x50, 0x54, 0x40, 0x0e, 0x80, topY - 0x1e);
-			}
-			for (let i = 0; i < topN; i++) {
-				const ch = ctx.characters[selections[i] ?? 0];
-				if (!ch) continue;
-				const px = topSp + (topSp + 50) * i;
-				const fi = ch.faceRow;
-				renderer.drawImage(
-					faceImg,
-					((fi - 1) % 6) * 50,
-					Math.floor((fi - 1) / 6) * 50,
-					50,
-					50,
-					px,
-					topY,
+			if (DAT_00d8 === 1) {
+				// Solo mode (line 8213-8262)
+				const n = Math.min(Math.max(totalSlots, 2), 8);
+				const topN = VS_TOP_ROW[n] ?? 2;
+				const botN = n - topN;
+				const topY = VS_TOP_Y[n] ?? 75;
+				const topSp = Math.floor((320 - topN * 50) / (topN + 1));
+
+				drawBorder(
+					cwImg,
+					Math.floor(topSp / 2),
+					0x140 - Math.floor(topSp / 2),
+					topY - 8,
+					botN > 0 ? (VS_BOT_Y[n] ?? 106) + 0x47 : topY + 0x47,
 				);
-				if (cwImg) {
-					if (i < pIndices.length) {
+				renderer.drawImage(cwImg, 0x50, 0x54, 0x40, 0x0e, 0x80, topY - 0x1e);
+
+				for (let i = 0; i < topN; i++) {
+					const charId = selections[i] ?? 0;
+					const px = topSp + (topSp + 50) * i;
+					drawFace(faceImg, charId, px, topY);
+					if (vsControllers[i] !== undefined && vsControllers[i] < 5) {
 						renderer.drawImage(
 							cwImg,
 							0,
-							pIndices[i] * 0x0e + 0x78,
+							vsControllers[i] * 0x0e + 0x78,
 							0x40,
 							0x0e,
 							px - 7,
@@ -1147,31 +1338,19 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 						);
 					}
 				}
-			}
-			if (botN > 0) {
-				const botY = VS_BOT_Y[n] ?? 106;
-				const botSp = Math.floor((320 - botN * 50) / (botN + 1));
-				for (let i = 0; i < botN; i++) {
-					const si = i + topN;
-					const ch = ctx.characters[selections[si] ?? 0];
-					if (!ch) continue;
-					const px = botSp + (botSp + 50) * i;
-					const fi = ch.faceRow;
-					renderer.drawImage(
-						faceImg,
-						((fi - 1) % 6) * 50,
-						Math.floor((fi - 1) / 6) * 50,
-						50,
-						50,
-						px,
-						botY,
-					);
-					if (cwImg) {
-						if (si < pIndices.length) {
+				if (botN > 0) {
+					const botY = VS_BOT_Y[n] ?? 106;
+					const botSp = Math.floor((320 - botN * 50) / (botN + 1));
+					for (let i = 0; i < botN; i++) {
+						const si = i + topN;
+						const charId = selections[si] ?? 0;
+						const px = botSp + (botSp + 50) * i;
+						drawFace(faceImg, charId, px, botY);
+						if (vsControllers[si] !== undefined && vsControllers[si] < 5) {
 							renderer.drawImage(
 								cwImg,
 								0,
-								pIndices[si] * 0x0e + 0x78,
+								vsControllers[si] * 0x0e + 0x78,
 								0x40,
 								0x0e,
 								px - 7,
@@ -1189,6 +1368,65 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 							);
 						}
 					}
+				}
+			} else {
+				// Team modes (line 8264-8386)
+				renderer.drawImage(cwImg, 0x50, 0x62, 0x40, 0x0e, 0x80, 6);
+
+				if (DAT_00dc === 2) {
+					// Two-team modes (de=1,2,3) — line 8266-8312
+					drawBorder(cwImg, 0x32, 0x10d, 0x1c, 0xb5);
+
+					if (DAT_00de === 3 && sc) {
+						// 4v4: 8 faces in 4x2 grid (line 8269-8276)
+						for (let i = 0; i < 8; i++) {
+							drawFace(
+								faceImg,
+								sc[i],
+								(i % 4) * 0x32 + 0x3c,
+								Math.floor(i / 4) * 0x46 + 0x33,
+							);
+						}
+					} else if (DAT_00de === 2 && sc) {
+						// 3v3: 3 per team (line 8278-8292)
+						for (let i = 0; i < 3; i++) {
+							drawFace(faceImg, sc[i], i * 0x43 + 0x44, 0x33);
+							drawFace(faceImg, sc[i + 4], i * 0x43 + 0x44, 0x79);
+						}
+					} else if (DAT_00de === 1 && sc) {
+						// 2v2: 2 per team (line 8294-8308)
+						for (let i = 0; i < 2; i++) {
+							drawFace(faceImg, sc[i], i * 0x50 + 0x5f, 0x33);
+							drawFace(faceImg, sc[i + 2], i * 0x50 + 0x5f, 0x79);
+						}
+					}
+					// "VS" separators between teams (line 8310-8311)
+					renderer.drawImage(cwImg, 0x50, 0x70, 0x40, 0x0e, 0x80, 0x24);
+					renderer.drawImage(cwImg, 0x50, 0x7e, 0x40, 0x0e, 0x80, 0x6a);
+				} else if (DAT_00dc === 3 && sc) {
+					// 3-team mode (line 8314-8344)
+					drawBorder(cwImg, 0x28, 0x117, 0x1c, 0xb5);
+					for (let i = 0; i < 2; i++) {
+						drawFace(faceImg, sc[i], (i % 4) * 0x32 + 0x32, 0x33);
+						drawFace(faceImg, sc[i + 2], (i % 4) * 0x32 + 0xaa, 0x33);
+						drawFace(faceImg, sc[i + 4], (i % 4) * 0x32 + 0x6e, 0x79);
+					}
+					renderer.drawImage(cwImg, 0x50, 0x70, 0x40, 0x0e, 0x44, 0x24);
+					renderer.drawImage(cwImg, 0x50, 0x7e, 0x40, 0x0e, 0xbc, 0x24);
+					renderer.drawImage(cwImg, 0x50, 0x8c, 0x40, 0x0e, 0x80, 0x6a);
+				} else if (sc) {
+					// 4-team mode (line 8345-8385)
+					drawBorder(cwImg, 0x28, 0x117, 0x1c, 0xb5);
+					for (let i = 0; i < 2; i++) {
+						drawFace(faceImg, sc[i], (i % 4) * 0x32 + 0x32, 0x33);
+						drawFace(faceImg, sc[i + 2], (i % 4) * 0x32 + 0xaa, 0x33);
+						drawFace(faceImg, sc[i + 4], (i % 4) * 0x32 + 0x32, 0x79);
+						drawFace(faceImg, sc[i + 6], (i % 4) * 0x32 + 0xaa, 0x79);
+					}
+					renderer.drawImage(cwImg, 0x50, 0x70, 0x40, 0x0e, 0x44, 0x24);
+					renderer.drawImage(cwImg, 0x50, 0x7e, 0x40, 0x0e, 0xbc, 0x24);
+					renderer.drawImage(cwImg, 0x50, 0x8c, 0x40, 0x0e, 0x44, 0x6a);
+					renderer.drawImage(cwImg, 0x50, 0x9a, 0x40, 0x0e, 0xbc, 0x6a);
 				}
 			}
 		}
