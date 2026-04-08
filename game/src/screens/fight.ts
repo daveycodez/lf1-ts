@@ -34,6 +34,8 @@ import type { GameContext } from "../main";
 // Constants from decompiled code
 // ══════════════════════════════════════════════════════════════
 
+const PRACTICE_MODE = true;
+
 const MAX_SLOTS = 30; // 0x1e — fighters + entities + projectiles
 const MAX_FIGHTERS = 8;
 const MAX_HITBOXES = 30; // 0x1e hitbox/projectile slots
@@ -1615,7 +1617,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			if (slots[i].v04 < 5) {
 				handleInput(i, tickKey);
 			} else {
-				runAI(i);
+				if (!PRACTICE_MODE) runAI(i);
 			}
 		}
 
