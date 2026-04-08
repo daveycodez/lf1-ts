@@ -121,9 +121,10 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 		let DAT_0193 = 0; // offset counter — DS:0193 = 0
 
 		// Screen state
-		type State = "title" | "mode" | "charsel" | "superinfo";
+		type State = "title" | "mode" | "charsel" | "superinfo" | "vsscreen";
 		let state: State = "title";
 		let selections: number[] = [];
+		let vsTickDelay = 0;
 		let totalSlots = 2;
 		let contestMode = false;
 		let showSuper = -1;
@@ -190,6 +191,9 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					case "superinfo":
 						updateSuperInfo();
 						break;
+					case "vsscreen":
+						updateVsScreen();
+						break;
 				}
 			}
 
@@ -206,6 +210,9 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					break;
 				case "superinfo":
 					renderSuperInfo();
+					break;
+				case "vsscreen":
+					renderVsScreen();
 					break;
 			}
 
@@ -663,7 +670,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			"SUPERK",
 		];
 		const playerState = [0, 0, 0]; // 0=idle, 1=selecting, 2=group, 3=confirmed
-		const playerChar = [1, 2, 3]; // 1-based character index
+		const playerChar = [0, 0, 0]; // starts at 0; RIGHT handler on join advances to 1 (Davis)
 		const playerGroup = [1, 1, 1]; // DS:0x133+p*2, group selection (1-4)
 		const groupAvail = ["N", "T", "T", "T", "T"]; // DS:0x102, index 0 unused
 		const groupCount = [0, 0, 0, 0, 0]; // DS:0x127+i*2, members per group
@@ -677,9 +684,9 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			playerState[0] = 0;
 			playerState[1] = 0;
 			playerState[2] = 0;
-			playerChar[0] = 1;
-			playerChar[1] = 2;
-			playerChar[2] = 3;
+			playerChar[0] = 0;
+			playerChar[1] = 0;
+			playerChar[2] = 0;
 			playerGroup[0] = 1;
 			playerGroup[1] = 1;
 			playerGroup[2] = 1;
@@ -714,17 +721,37 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 			}
 			if (charSelExitCountdown === 0) {
 				selections = [];
+				const playerIndices: number[] = [];
 				for (let p = 0; p < 3; p++) {
-					if (playerState[p] === 3) selections.push(playerChar[p] - 1);
+					if (playerState[p] === 3) {
+						selections.push(playerChar[p] - 1);
+						playerIndices.push(p);
+					}
 				}
+				// Fill empty slots with unique random characters (line 8642-8659)
 				while (selections.length < totalSlots) {
-					selections.push(Math.floor(Math.random() * MAX_CHARS));
+					let charId: number;
+					let unique: boolean;
+					do {
+						unique = true;
+						charId = Math.floor(Math.random() * MAX_CHARS);
+						for (let j = 0; j < selections.length; j++) {
+							if (selections[j] === charId) {
+								unique = false;
+								break;
+							}
+						}
+					} while (!unique);
+					selections.push(charId);
 				}
 				ctx.shared.selections = selections;
+				ctx.shared.playerIndices = playerIndices;
 				ctx.shared.humanPlayers = charSelJoinCount;
 				ctx.shared.totalSlots = totalSlots;
-				done = true;
-				resolve(contestMode ? EXIT_CONTEST : EXIT_FIGHT);
+				// Go to VS screen before fight (FUN_1520_2944)
+				playAudio(2, 0x19);
+				vsTickDelay = 10;
+				state = "vsscreen";
 				return;
 			}
 
@@ -777,7 +804,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 					playerState[p] = 1;
 					charSelAnyJoined = true;
 					charSelJoinCount++;
-					local_13 = KEYS.RIGHT[p]; // consume key (line 7398)
+					local_13 = KEYS.RIGHT[p]; // line 7398: triggers RIGHT handler to skip taken chars
 				}
 
 				// LEFT (DS:0x175): prev character (state 1, line 7401)
@@ -1001,6 +1028,168 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 						(SCREEN_W - 106) / 2,
 						(SCREEN_H - 152) / 2,
 					);
+			}
+		}
+
+		// ══════════════════════════════════════════════════════
+		// FUN_1520_2944: VS/Matchup Screen
+		// Shows fighter portraits before battle, waits for keypress
+		// ══════════════════════════════════════════════════════
+		function updateVsScreen() {
+			animTickCounter++;
+			if (animTickCounter >= 2) {
+				animTickCounter = 0;
+				stepAnimation();
+			}
+
+			// 10-tick delay before accepting input (line 8393-8395)
+			if (vsTickDelay > 0) {
+				vsTickDelay--;
+				return;
+			}
+
+			// Wait for any keypress (line 8396-8399)
+			if (input.anyKeyPressed()) {
+				done = true;
+				resolve(contestMode ? EXIT_CONTEST : EXIT_FIGHT);
+			}
+		}
+
+		// FUN_1520_2944: VS screen — exact port from binary tables (line 8175-8399)
+		// Layout tables extracted from START.EXE at 0x1d1/0x1df/0x1ed/0x1fb
+		const VS_TOP_ROW: Record<number, number> = {
+			2: 2,
+			3: 3,
+			4: 4,
+			5: 3,
+			6: 3,
+			7: 4,
+			8: 4,
+		};
+		const VS_TOP_Y: Record<number, number> = {
+			2: 75,
+			3: 75,
+			4: 75,
+			5: 36,
+			6: 36,
+			7: 36,
+			8: 36,
+		};
+		const VS_BOT_Y: Record<number, number> = { 5: 106, 6: 106, 7: 106, 8: 106 };
+		function renderVsScreen() {
+			renderTileBackground();
+			const faceImg = assets.getImage("FACE");
+			const cwImg = assets.getImage("CWORD");
+			const dimImg = assets.getImage("CWORD_DIM");
+			if (!faceImg) return;
+			const n = Math.min(Math.max(totalSlots, 2), 8);
+			const pIndices: number[] = ctx.shared.playerIndices ?? [];
+			const topN = VS_TOP_ROW[n] ?? 2;
+			const botN = n - topN;
+			const topY = VS_TOP_Y[n] ?? 75;
+			const topSp = Math.floor((320 - topN * 50) / (topN + 1));
+
+			// FUN_1520_2744(p1=left, p2=right, p3=top, p4=bottom) line 8147-8171
+			// Called at line 8219: (topSp/2, 320-topSp/2, topY-8, local_a)
+			// local_a = botYBase + 0x47
+			if (cwImg) {
+				const p1 = Math.floor(topSp / 2);
+				const p2 = 0x140 - p1;
+				const p3 = topY - 8;
+				const p4 = botN > 0 ? (VS_BOT_Y[n] ?? 106) + 0x47 : topY + 0x47;
+				const mY = Math.floor((p4 + p3 + 0x46) / 2) - 0x46;
+				renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, mY);
+				renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, mY);
+				renderer.drawImage(cwImg, 0xa0, 0x78, 0x96, 0x46, p1, p3);
+				renderer.drawImage(cwImg, 0xa0, 0x82, 0x96, 0x46, p1, p4 - 0x46);
+				renderer.drawImage(cwImg, 0xaa, 0x78, 0x96, 0x46, p2 - 0x96, p3);
+				renderer.drawImage(cwImg, 0xaa, 0x82, 0x96, 0x46, p2 - 0x96, p4 - 0x46);
+			}
+
+			// "VS" label from CWORD (line 8220)
+			if (cwImg) {
+				renderer.drawImage(cwImg, 0x50, 0x54, 0x40, 0x0e, 0x80, topY - 0x1e);
+			}
+			for (let i = 0; i < topN; i++) {
+				const ch = ctx.characters[selections[i] ?? 0];
+				if (!ch) continue;
+				const px = topSp + (topSp + 50) * i;
+				const fi = ch.faceRow;
+				renderer.drawImage(
+					faceImg,
+					((fi - 1) % 6) * 50,
+					Math.floor((fi - 1) / 6) * 50,
+					50,
+					50,
+					px,
+					topY,
+				);
+				if (cwImg) {
+					if (i < pIndices.length) {
+						renderer.drawImage(
+							cwImg,
+							0,
+							pIndices[i] * 0x0e + 0x78,
+							0x40,
+							0x0e,
+							px - 7,
+							topY + 0x33,
+						);
+					} else {
+						renderer.drawImage(
+							cwImg,
+							0,
+							0xa2,
+							0x18,
+							0x0e,
+							px + 0x0c,
+							topY + 0x33,
+						);
+					}
+				}
+			}
+			if (botN > 0) {
+				const botY = VS_BOT_Y[n] ?? 106;
+				const botSp = Math.floor((320 - botN * 50) / (botN + 1));
+				for (let i = 0; i < botN; i++) {
+					const si = i + topN;
+					const ch = ctx.characters[selections[si] ?? 0];
+					if (!ch) continue;
+					const px = botSp + (botSp + 50) * i;
+					const fi = ch.faceRow;
+					renderer.drawImage(
+						faceImg,
+						((fi - 1) % 6) * 50,
+						Math.floor((fi - 1) / 6) * 50,
+						50,
+						50,
+						px,
+						botY,
+					);
+					if (cwImg) {
+						if (si < pIndices.length) {
+							renderer.drawImage(
+								cwImg,
+								0,
+								pIndices[si] * 0x0e + 0x78,
+								0x40,
+								0x0e,
+								px - 7,
+								botY + 0x33,
+							);
+						} else {
+							renderer.drawImage(
+								cwImg,
+								0,
+								0xa2,
+								0x18,
+								0x0e,
+								px + 0x0c,
+								botY + 0x33,
+							);
+						}
+					}
+				}
 			}
 		}
 

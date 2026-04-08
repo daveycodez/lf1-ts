@@ -497,6 +497,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	const humanPlayers = ctx.shared.humanPlayers ?? 1;
 	const totalSlots = ctx.shared.totalSlots ?? 2;
 	const selections: number[] = ctx.shared.selections ?? [0, 1];
+	const playerIndices: number[] = ctx.shared.playerIndices ?? [0];
 
 	// Per-character tactic table (from char_id * 0x12 + 0x2f1a)
 	// [walkType, moveType, attackRange, specialId, specialRange, bounceDiv]
@@ -709,7 +710,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		}
 
 		// Spawn body hitbox when on ground and AI type (line 9513-9520)
-		if (s.v00 === groundCap && s.v04 >= 5) {
+		if (s.v00 === groundCap && s.f2 === 2) {
 			const dir =
 				s.v06 !== 0 ? (s.v06 > 0 ? 1 : -1) : Math.random() > 0.5 ? 1 : -1;
 			spawnHitbox(
@@ -986,17 +987,20 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		if (s.v08 !== 0) s.fe += s.v08;
 		if (s.v0a !== 0) s.v00 += s.v0a;
 
-		// Walk animation for fighters (when grounded and in walk state)
-		// v00 is now updated, so airborne fighters won't match v00===0
-		if (s.v14 >= 1 && s.v14 <= 6 && s.v00 === 0 && s.v0a === 0) {
+		// Fighter walk animation (simplified from FUN_25f1_2a27 / FUN_2b82_2978)
+		// Fighters use v14=0 for idle. Walk frames cycle v12 through 1-3 based on movement.
+		// Landing resets v12=1, v14=0 (line 12083-12085)
+		if (s.v12 === 0x15 && s.v00 === 0) {
+			s.v12 = 1;
+			s.v14 = 0;
+		}
+		if (s.v14 < 5 && s.v00 === 0 && s.v0a === 0) {
 			if (s.v06 !== 0 || s.v08 !== 0) {
-				s.v14++;
-				if (s.v14 > 6) s.v14 = 1;
-				if (s.v14 === 1 || s.v14 === 6) s.v12 = 1;
-				else if (s.v14 === 3 || s.v14 === 4) s.v12 = 2;
-				else s.v12 = 3;
-			} else if (s.v12 < 4) {
-				s.v14 = 1;
+				// Walking: cycle v12 through 1→2→3→1
+				s.v12++;
+				if (s.v12 > 3) s.v12 = 1;
+			} else {
+				// Idle: v12=1 (standing)
 				s.v12 = 1;
 			}
 		}
@@ -1202,10 +1206,10 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	function handleInput(p: number) {
 		const s = slots[p];
 		if (s.f2 !== 1) return;
-		if (s.v04 >= 5) return;
+		if (s.v04 >= 5) return; // v04 >= 5 = CPU (line 19324)
+		const ki = s.v04; // key index from player controller position (0, 1, 2)
 
 		// Movement state guard (line 19392):
-		// v14 < 5 || v14==0x47 || v14==0x48 || v14/10==0xd || v14==0xfb || v12==0x2f || v12==0x30
 		const canMove =
 			s.v14 < 5 ||
 			s.v14 === 0x47 ||
@@ -1215,28 +1219,28 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v12 === 0x2f ||
 			s.v12 === 0x30;
 
-		// LEFT (line 19392-19407): v02=-1, if v06>-5 && v00==0 → v06=-5
-		if (canMove && input.isAsciiDown(KEYS.LEFT[p])) {
+		// LEFT (line 19392-19407)
+		if (canMove && input.isAsciiDown(KEYS.LEFT[ki])) {
 			s.v02 = i16(0xffff);
 			if (s.v06 > -5 && s.v00 === 0) s.v06 = -5;
 		}
-		// RIGHT (line 19408-19423): v02=1, if v06<5 && v00==0 → v06=5
-		if (canMove && input.isAsciiDown(KEYS.RIGHT[p])) {
+		// RIGHT (line 19408-19423)
+		if (canMove && input.isAsciiDown(KEYS.RIGHT[ki])) {
 			s.v02 = 1;
 			if (s.v06 < 5 && s.v00 === 0) s.v06 = 5;
 		}
-		// UP (line 19424-19438): if v08>-3 && v00==0 → v08=-3
-		if (canMove && input.isAsciiDown(KEYS.UP[p])) {
+		// UP (line 19424-19438)
+		if (canMove && input.isAsciiDown(KEYS.UP[ki])) {
 			if (s.v08 > -3 && s.v00 === 0) s.v08 = -3;
 		}
-		// DOWN (line 19439-19453): if v08<3 && v00==0 → v08=3
-		if (canMove && input.isAsciiDown(KEYS.DOWN[p])) {
+		// DOWN (line 19439-19453)
+		if (canMove && input.isAsciiDown(KEYS.DOWN[ki])) {
 			if (s.v08 < 3 && s.v00 === 0) s.v08 = 3;
 		}
 
-		// JUMP (line 19454-19480): v14<5 || v14/10==9 || v12==0x15
+		// JUMP (line 19454-19480)
 		if (
-			input.isAsciiPressed(KEYS.JUMP[p]) &&
+			input.isAsciiPressed(KEYS.JUMP[ki]) &&
 			(s.v14 < 5 || Math.floor(s.v14 / 10) === 9 || s.v12 === 0x15) &&
 			s.v00 === 0 &&
 			s.v20 > 9
@@ -1245,9 +1249,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v14 = 0x47;
 		}
 
-		// ATTACK (line 19516-19526): v14<5 || v14==13 || v14==14 || v14==23 || v14==24 || v14/10==9
+		// ATTACK (line 19516-19526)
 		if (
-			input.isAsciiPressed(KEYS.ATTACK[p]) &&
+			input.isAsciiPressed(KEYS.ATTACK[ki]) &&
 			(s.v14 < 5 ||
 				s.v14 === 13 ||
 				s.v14 === 14 ||
@@ -1270,7 +1274,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	function runAI(p: number) {
 		const s = slots[p];
 		if (s.f2 !== 1) return;
-		if (s.v04 < 5) return; // human-controlled fighters don't use AI
+		if (s.v04 < 5) return; // v04 < 5 = human-controlled, don't use AI
 
 		const decade = Math.floor(s.v14 / 10);
 		if (decade === 2 || decade === 4) return; // hit/death: no AI
@@ -1500,15 +1504,36 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			if (idx < MAX_FIGHTERS && !isDead) {
 				const fontsImg = assets.getImage("NEWFONTS");
 				if (fontsImg) {
-					const charCode = s.v04 >= 5 ? 0x63 : s.v04 + 0x31; // 'c' or '1'-'8'
+					const charCode = s.v04 >= 5 ? 0x63 : s.v04 + 0x31;
 					const fontCol = charCode % 16;
 					const fontRow = Math.floor(charCode / 16);
 					const fsx = fontCol * 6;
 					const fsy = fontRow * 8;
 					const facing = i16(s.v02);
-					const numX = s.fc - 2 + facing * -3 - scrollX;
+					const numX = s.fc - 2 + facing * -2 - scrollX;
 					const numY = s.fe + s.v00 - 0x1f;
-					renderer.drawImage(fontsImg, fsx, fsy, 4, 7, numX, numY);
+					// Per-fighter color from FIGHT.EXE 0x165 table:
+					// [1,16,31,46,65,108,126,144] → pal[value] from PAL file
+					const FIGHTER_COLORS = [
+						"#0000ff",
+						"#00ff00",
+						"#ff0000",
+						"#b600ff",
+						"#ffff00",
+						"#0065a2",
+						"#827959",
+						"#fb6d8e",
+					];
+					const tint = FIGHTER_COLORS[idx % FIGHTER_COLORS.length];
+					recolorCtx.clearRect(0, 0, ACT_SPR, ACT_SPR);
+					recolorCtx.drawImage(fontsImg, fsx, fsy, 5, 7, 0, 0, 5, 7);
+					recolorCtx.globalCompositeOperation = "source-in";
+					recolorCtx.fillStyle = tint;
+					recolorCtx.fillRect(0, 0, 5, 7);
+					recolorCtx.globalCompositeOperation = "source-over";
+					renderer
+						.getOffscreenCtx()
+						.drawImage(recolorCanvas, 0, 0, 5, 7, numX, numY, 5, 7);
 				}
 			}
 
@@ -1678,10 +1703,10 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		const y = getYMax(stageIdx) - i * 3;
 		initFighter(i, charId, x, y);
 
-		// AI fighters: f2=1 (same as human) but v04>=5 distinguishes CPU
-		if (i >= humanPlayers) {
-			slots[i].v04 = 5; // CPU fighter (v04 < 5 = human, v04 >= 5 = AI)
-		}
+		// v04 = player controller index (0-2 for humans, 5 for CPU)
+		// From shared data row 2 (line 17885-17886): 0x117[slot]
+		// Used for: key lookup, number display (v04+'1'), AI detection
+		slots[i].v04 = i < playerIndices.length ? playerIndices[i] : 5;
 
 		// Team assignment
 		hud[i].v3c = i < Math.ceil(totalSlots / 2) ? 0 : 1;
