@@ -46,7 +46,7 @@ const ACT_CELL = 26; // cell pitch in the sprite sheet
 const ACT_PAD = 1; // padding before sprite data in each cell
 const ACT_SPR = 25; // actual sprite size (0x19)
 const ACT_COLS = 12; // 0xc columns per sheet
-const ACT1_MAX = 61; // 0x3d — frames 0-60 in ACT1, 61+ in ACT2
+const ACT1_MAX = 60; // 12 cols * 5 rows = 60 frames per sheet (0-59 ACT1, 60+ ACT2)
 
 const WEAP_FW = 18;
 const WEAP_FH = 16;
@@ -228,6 +228,131 @@ function abs16(v: number): number {
 export async function runFightExe(ctx: GameContext): Promise<void> {
 	const { renderer, input, audio, assets, timer } = ctx;
 
+	// ── Color replacement for per-fighter sprite recoloring ──
+	// Base ACT1 sprite uses palette band 151-159 (neutral purple tones).
+	// In the original, DAT_0096 = fighter*10 shifts into the fighter's palette band.
+	// Since we can't do VGA palette tricks, we do pixel-level color replacement.
+	// User-verified base sprite color → body part mapping:
+	const BASE_MAP: { rgb: [number, number, number]; part: string }[] = [
+		{ rgb: [56, 69, 113], part: "s1" }, // #384571 → skin1
+		{ rgb: [81, 81, 113], part: "s2" }, // #515171 → skin2
+		{ rgb: [89, 81, 113], part: "h1" }, // #595171 → shirt1
+		{ rgb: [97, 81, 113], part: "h2" }, // #615171 → shirt2
+		{ rgb: [105, 81, 113], part: "t1" }, // #695171 → pants1
+		{ rgb: [113, 81, 113], part: "t2" }, // #715171 → pants2
+		{ rgb: [113, 81, 105], part: "ol" }, // #715169 → outline
+		{ rgb: [113, 81, 89], part: "ol" }, // #715159 → outline
+	];
+
+	function getCharColors(
+		charIdx: number,
+	): Map<string, [number, number, number]> {
+		const ch = ctx.characters[charIdx];
+		if (!ch) return new Map();
+		const pal = gamePalette;
+		if (!pal) return new Map();
+		const [s1, s2] = ch.skinColors;
+		const [h1, h2] = ch.shirtColors;
+		const [t1, t2] = ch.trouserColors;
+		const partToColor: Record<string, [number, number, number]> = {
+			s1: pal[s1] ?? [0, 0, 0],
+			s2: pal[s2] ?? [0, 0, 0],
+			h1: pal[h1] ?? [0, 0, 0],
+			h2: pal[h2] ?? [0, 0, 0],
+			t1: pal[t1] ?? [0, 0, 0],
+			t2: pal[t2] ?? [0, 0, 0],
+			ol: [0, 0, 0],
+		};
+		const colorMap = new Map<string, [number, number, number]>();
+		for (const { rgb, part } of BASE_MAP) {
+			colorMap.set(`${rgb[0]},${rgb[1]},${rgb[2]}`, partToColor[part]);
+		}
+		return colorMap;
+	}
+
+	// Offscreen canvas for color-replaced sprites
+	const recolorCanvas = document.createElement("canvas");
+	recolorCanvas.width = ACT_SPR;
+	recolorCanvas.height = ACT_SPR;
+	const recolorCtx = recolorCanvas.getContext("2d")!;
+
+	function drawRecoloredSprite(
+		img: HTMLImageElement,
+		sx: number,
+		sy: number,
+		dx: number,
+		dy: number,
+		flip: boolean,
+		charIdx: number,
+	) {
+		const colorMap = getCharColors(charIdx);
+		recolorCtx.clearRect(0, 0, ACT_SPR, ACT_SPR);
+		if (flip) {
+			recolorCtx.save();
+			recolorCtx.translate(ACT_SPR, 0);
+			recolorCtx.scale(-1, 1);
+			recolorCtx.drawImage(
+				img,
+				sx,
+				sy,
+				ACT_SPR,
+				ACT_SPR,
+				0,
+				0,
+				ACT_SPR,
+				ACT_SPR,
+			);
+			recolorCtx.restore();
+		} else {
+			recolorCtx.drawImage(
+				img,
+				sx,
+				sy,
+				ACT_SPR,
+				ACT_SPR,
+				0,
+				0,
+				ACT_SPR,
+				ACT_SPR,
+			);
+		}
+		if (colorMap.size > 0) {
+			const imgData = recolorCtx.getImageData(0, 0, ACT_SPR, ACT_SPR);
+			const d = imgData.data;
+			for (let p = 0; p < d.length; p += 4) {
+				if (d[p + 3] === 0) continue;
+				const key = `${d[p]},${d[p + 1]},${d[p + 2]}`;
+				const rep = colorMap.get(key);
+				if (rep) {
+					d[p] = rep[0];
+					d[p + 1] = rep[1];
+					d[p + 2] = rep[2];
+				}
+			}
+			recolorCtx.putImageData(imgData, 0, 0);
+		}
+		renderer.getOffscreenCtx().drawImage(recolorCanvas, dx, dy);
+	}
+
+	// Load game palette for color lookups
+	let gamePalette: [number, number, number][] | null = null;
+	{
+		const palBuf = await (await fetch("/assets/PAL")).arrayBuffer();
+		const palRaw = new Uint8Array(palBuf);
+		gamePalette = [];
+		for (let i = 0; i < 256; i++) {
+			const pi = ((i - 1) & 0xff) * 3;
+			const r6 = palRaw[pi] & 0x3f;
+			const g6 = palRaw[pi + 1] & 0x3f;
+			const b6 = palRaw[pi + 2] & 0x3f;
+			gamePalette.push([
+				(r6 << 2) | (r6 >> 4),
+				(g6 << 2) | (g6 >> 4),
+				(b6 << 2) | (b6 >> 4),
+			]);
+		}
+	}
+
 	// ── Game state arrays (matching DAT_3463 data segment) ──
 	const slots: Slot[] = Array.from({ length: MAX_SLOTS }, mkSlot);
 	const hitboxes: Hitbox[] = Array.from({ length: MAX_HITBOXES }, mkHitbox);
@@ -282,8 +407,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		s.f4 = charId + 1; // 33f4: simplified skin index
 		s.v1a = 200; // 341a = 200 (max HP)
 		s.v16 = 200; // 3416 = 200 (current HP)
-		s.v20 = 250; // 3420 = 0xfa (MP)
-		s.v1e = 250; // 341e: from char table 0x3d0a
+		s.v20 = 100; // 3420: starting MP (pre-init value, line 17928)
+		s.v1e = 250; // 341e: maxMP (0xfa, line 17927)
 		s.f8 = 0x33; // 33f8 = 0x33 (51 lives)
 		s.fa = 0x33; // 33fa = 0x33
 		s.v0e = 1; // 340e = 1
@@ -1108,6 +1233,14 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			}
 		}
 
+		// Passive MP regen: +1 per tick, capped at v1e (line 14331-14332)
+		for (let i = 0; i < MAX_FIGHTERS; i++) {
+			if (slots[i].f2 === 0) continue;
+			if (slots[i].v20 < slots[i].v1e) {
+				slots[i].v20++;
+			}
+		}
+
 		// Drain sound queue
 		drainSoundQueue();
 
@@ -1196,96 +1329,116 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				const drawX = s.fc - scrollX - 12;
 				const drawY = s.fe + s.v00 - 0x18;
 
-				renderer.drawSprite(
-					actImg,
-					sx,
-					sy,
-					ACT_SPR,
-					ACT_SPR,
-					drawX,
-					drawY,
-					flip,
-				);
+				// Body sprite with per-fighter color replacement
+				if (actImg && idx < MAX_FIGHTERS) {
+					drawRecoloredSprite(actImg, sx, sy, drawX, drawY, flip, s.v18);
+				} else if (actImg) {
+					renderer.drawSprite(
+						actImg,
+						sx,
+						sy,
+						ACT_SPR,
+						ACT_SPR,
+						drawX,
+						drawY,
+						flip,
+					);
+				}
+
+				// HEAD overlay (FUN_25f1_1d67, line 18412-18428)
+				// X = fc + facing*-4 + DAT_4b4a[v12]*facing - 8
+				// Y = fe + DAT_4b0d[v12] + v00 - 0x18
+				// DAT_4b4a/4b0d default to 0 for standing frames
+				// DAT_0094 = (facing-1)/2 controls head flip
+				if (idx < MAX_FIGHTERS) {
+					const ch = ctx.characters[s.v18];
+					const hImg = assets.getImage("HEAD");
+					if (ch && hImg) {
+						const hi = ch.headPic;
+						const hsx = ((hi - 1) % 11) * 18 + 1;
+						const hsy = Math.floor((hi - 1) / 11) * 13 + 1;
+						const facing = i16(s.v02);
+						const headScreenX = s.fc + facing * -4 - 8 - scrollX;
+						const headScreenY = s.fe + s.v00 - 0x18;
+						renderer.drawSprite(
+							hImg,
+							hsx,
+							hsy,
+							17,
+							12,
+							headScreenX,
+							headScreenY,
+							flip,
+						);
+					}
+				}
 			}
 		}
 
-		// HP/MP bars floating above each character (FUN_25f1_292f, line 18578)
-		// DAT_3463_0134 == 'F' (fight mode default):
-		//   HP X = fc - 0x19,  HP Y = fe + v00 + row - 0x2d
-		//   MP X = fc - 0x19,  MP Y = fe + v00 + row - 0x23
-		// Bar width = (value * 10) / scale  where scale = maxValue / 5
+		// ── HUD rendering (FUN_25f1_292f, lines 18561-18642) ──
+		// Step 1: MENU.GRH at (0,0) — opaque, covers top 56 rows over sprites
+		const menuImg = assets.getImage("MENU");
+		if (menuImg) renderer.drawFullImage(menuImg, 0, HUD_Y);
+
+		// Step 2: Character portraits in HUD (FUN_25f1_00e1, line 17432-17442)
+		// Draw ACT1 body (1,1) 25x25 with per-fighter color replacement,
+		// then HEAD overlay (17x12) on top
+		{
+			const hudActImg = assets.getImage("ACT1");
+			const hudHeadImg = assets.getImage("HEAD");
+			for (let i = 0; i < MAX_FIGHTERS; i++) {
+				if (slots[i].f2 === 0) continue;
+				const ch = ctx.characters[slots[i].v18];
+				if (!ch) continue;
+				const col = i % 4;
+				const row = Math.floor(i / 4);
+				const dx = col * 0x50 + 6;
+				const dy = row * 0x1b + 3;
+				// Body: ACT1 frame 0 at (1,1), recolored per fighter
+				if (hudActImg) {
+					drawRecoloredSprite(
+						hudActImg,
+						ACT_PAD,
+						ACT_PAD,
+						dx,
+						dy,
+						false,
+						slots[i].v18,
+					);
+				}
+				// HEAD overlay at same position as body (line 17441-17442)
+				if (hudHeadImg) {
+					const hi = ch.headPic;
+					const hsx = ((hi - 1) % 11) * 18 + 1;
+					const hsy = Math.floor((hi - 1) / 11) * 13 + 1;
+					renderer.drawImage(hudHeadImg, hsx, hsy, 17, 12, dx, dy);
+				}
+			}
+		}
+
+		// Step 3: HP bars ON TOP of MENU (line 18578-18589)
+		// X = (i%4)*0x50 + 0x1a, Y = (i/4)*0x1b + row + 10, 5 rows, max 50px wide
+		// Color: palette 0x1f (bright) — approximate as white/green
 		for (let i = 0; i < MAX_FIGHTERS; i++) {
 			if (slots[i].f2 === 0) continue;
 			if (slots[i].v16 < 1) continue;
 			if (Math.floor(slots[i].v14 / 10) === 0x28) continue;
 
-			const s = slots[i];
-			const sx = s.fc - scrollX;
-			const sy = s.fe + s.v00;
-
-			// HP bar: 5 rows (line 18578-18589)
-			const hpX = sx - 0x19;
-			const hpY = sy - 0x2d;
+			const hpBarX = (i % 4) * 0x50 + 0x1a;
+			const hpBarBaseY = Math.floor(i / 4) * 0x1b + 10;
 			const hpScale = hud[i].v42 > 0 ? hud[i].v42 : 40;
-			const hpW = Math.max(0, Math.floor((s.v16 * 10) / hpScale));
-			for (let r = 0; r < 5; r++) {
-				renderer.drawRect(
-					hpX,
-					hpY + r,
-					hpW,
-					1,
-					s.v16 > s.v1a / 2 ? "#0c0" : s.v16 > s.v1a / 4 ? "#cc0" : "#c00",
-				);
-			}
+			const hpW = Math.max(0, Math.floor((slots[i].v16 * 10) / hpScale));
+			renderer.drawRect(hpBarX, hpBarBaseY, hpW, 5, "#ff0000");
 
-			// MP bar: 5 rows (line 18594-18642), only for human fighters with MP > 0
-			if (s.f2 === 1 && s.v20 > 0) {
-				const mpX = sx - 0x19;
-				const mpY = sy - 0x23;
+			// Step 4: MP bars ON TOP of MENU (line 18594-18642)
+			// Y = (i/4)*0x1b + row + 0x14, same X, 5 rows
+			if (slots[i].f2 === 1 && slots[i].v20 > 0) {
+				const mpBarBaseY = Math.floor(i / 4) * 0x1b + 0x14;
 				const mpScale = hud[i].v44 > 0 ? hud[i].v44 : 50;
-				const mpW = Math.max(0, Math.floor((s.v20 * 10) / mpScale));
-				for (let r = 0; r < 5; r++) {
-					renderer.drawRect(mpX, mpY + r, mpW, 1, "#08f");
-				}
+				const mpW = Math.max(0, Math.floor((slots[i].v20 * 10) / mpScale));
+				renderer.drawRect(hpBarX, mpBarBaseY, mpW, 5, "#00aaff");
 			}
 		}
-
-		// HUD: MENU.GRH at Y=0 (TOP of screen, 320x56)
-		const menuImg = assets.getImage("MENU");
-		if (menuImg) renderer.drawFullImage(menuImg, 0, HUD_Y);
-
-		// HEAD portraits in HUD (FUN_25f1_02e5, line 17464):
-		// X = (i % 4) * 0x50 + 6, Y = (i / 4) * 0x1b + 3
-		const headImg = assets.getImage("HEAD");
-		if (headImg) {
-			for (let i = 0; i < MAX_FIGHTERS; i++) {
-				if (slots[i].f2 === 0) continue;
-				const ch = ctx.characters[slots[i].v18];
-				if (!ch) continue;
-				const headIdx = ch.headPic - 1;
-				if (headIdx < 0) continue;
-				const hsx = (headIdx % HEAD_COLS) * HEAD_FW;
-				const hsy = Math.floor(headIdx / HEAD_COLS) * HEAD_FH;
-				const col = i % 4;
-				const row = Math.floor(i / 4);
-				const dx = col * 0x50 + 6;
-				const dy = row * 0x1b + 3;
-				renderer.drawImage(headImg, hsx, hsy, HEAD_FW, HEAD_FH, dx, dy);
-			}
-		}
-
-		// DEBUG: stage info + Y bounds + walkable area lines
-		const _yMin = getYMin(stageIdx) - 3;
-		const _yMax = getYMax(stageIdx) + 2;
-		renderer.drawText(
-			`${getStageName(stageIdx)} idx=${stageIdx} Y=${_yMin}-${_yMax}`,
-			60,
-			58,
-			"#ff0",
-			7,
-		);
-		renderer.drawRect(0, _yMin, SCREEN_W, 1, "#0f0");
-		renderer.drawRect(0, _yMax, SCREEN_W, 1, "#f00");
 
 		// Pause overlay
 		if (paused) {

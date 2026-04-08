@@ -1,0 +1,82 @@
+LF1 Data Changing Reference (from lf-empire.de/lf1-empire/data-changing)
+
+== DATA.DAT Structure ==
+
+Head: character face index (1-11)
+Face: face color pair
+Skn: skin color pair
+Sht: shirt color pair
+Trs: trouser/pants color pair
+Sp: special move definition
+
+== Special Move Line Format ==
+Sp: [combo] [frame1] [frame2] [frame3] [frame4] [projectile_type] [mp_cost]
+
+The LAST number is the MP cost.
+
+== Special Move Combo Keys (all end with Attack) ==
+A : left right right Attack
+B : right down up Attack
+C : right left right Attack (original special)
+D : Jump right right Attack
+E : up down left right Attack
+F : character comes with special weapon, press Attack to use
+G : with special weapon press Attack for beam
+H : right left right Attack (summon weapon)
+
+== Color Pairs ==
+Peach:  83 81
+Red:    33 34
+Black:  10 10
+Blue:    1  3
+Green:  98 99
+Purple: 48 49
+Yellow: 67 68
+Orange: 145 146
+White:  15 100
+Tan:    82 81
+
+== Known Special Move MP Costs ==
+
+Balls (projectiles):
+  Julian ball:       25 MP
+  Davis ball:        25 MP
+  Dennis ball:       25 MP
+  Firen ball:        25 MP
+  Freeze ball:       50 MP
+  Rudolf ball:       50 MP
+  John ball:         25 MP
+  John disc:         75 MP
+  Woody ball:        25 MP
+
+Physical (melee specials):
+  Dennis combo:     175 MP
+  Julian combo:      50 MP
+  Davis combo:      175 MP
+  Woody combo:      175 MP
+  Louis kick:       100 MP
+  Louis air:         75 MP
+
+Other:
+  Freeze weapon:    100 MP
+  Louis palm:       150 MP
+  Henry palm:       125 MP
+  Henry flute:      150 MP
+  Julian explosion: 125 MP
+  John chargeup:    200 MP  (highest cost in the game)
+  Deep explosion:   125 MP
+  Freeze whirlwind: 150 MP
+  Firen blaze:      175 MP
+  Firen explosion:   75 MP
+  Davis catch:       50 MP
+  Woody teleport:    25 MP
+  Rudolf invisible: 125 MP
+  Rudolf teleport:   50 MP
+  Dennis catch:      50 MP
+
+== Key Observations ==
+- MP costs range from 12 to 200
+- John's chargeup (E special) at 200 MP is the most expensive
+- Each character has exactly 3 special moves in DATA.DAT
+- The cheapest specials (balls) cost 25 MP
+- Combo/physical specials cost 100-175 MP
