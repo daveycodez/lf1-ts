@@ -169,7 +169,7 @@ export async function runStartExe(ctx: GameContext): Promise<number> {
 		timer.start();
 
 		function frame() {
-			if (done) return;
+			if (done || ctx.signal.aborted) return;
 
 			// Run logic at exactly 18.2Hz (DOS PIT timer rate)
 			// timer.update() returns how many 18.2Hz ticks elapsed since last call

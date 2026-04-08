@@ -57,6 +57,7 @@ export interface GameContext {
 	specials: SpecialAttackDef[];
 	aiTable: number[][];
 	shared: Record<string, any>;
+	signal: AbortSignal;
 }
 
 // Exit codes matching DOS ERRORLEVEL from START.EXE
@@ -143,6 +144,7 @@ async function main(startAt = "start") {
 		specials,
 		aiTable,
 		shared: {},
+		signal,
 	};
 
 	// ── PLAY.COM main loop ──
@@ -171,6 +173,6 @@ main().catch(console.error);
 
 if (import.meta.hot) {
 	import.meta.hot.accept(() => {
-		main(currentScreen).catch(console.error);
+		window.location.reload();
 	});
 }

@@ -100,6 +100,31 @@ const SOUND_NAMES = [
 	"SR",
 ];
 
+// Per-frame head offset tables (FUN_25f1_1562 lines 18081-18112)
+// DAT_4b4a[v12] = X offset for head relative to body, multiplied by facing
+// DAT_4b0d[v12] = Y offset for head (0=normal, 0x32=50=lowered, 0x3c/0x3d=very low)
+const HEAD_OFFSET_X: number[] = new Array(61).fill(0);
+const HEAD_OFFSET_Y: number[] = new Array(61).fill(0);
+// X offsets (line 18087-18093)
+for (const i of [7, 11, 24, 38, 39]) HEAD_OFFSET_X[i] = 4;
+for (const i of [44, 45, 46, 50, 51, 58, 59, 60]) HEAD_OFFSET_X[i] = 3;
+// Y offsets (line 18098-18111)
+for (const i of [
+	12, 13, 14, 15, 16, 17, 18, 19, 20, 22, 23, 26, 27, 28, 29, 30, 31, 33, 34,
+	35, 36, 37, 40, 41, 42, 43, 47, 48, 52, 53, 54, 55, 56,
+])
+	HEAD_OFFSET_Y[i] = 0x32;
+for (const i of [38, 50, 51]) HEAD_OFFSET_Y[i] = 0x3c;
+HEAD_OFFSET_Y[39] = 0x3d;
+// Crouch/jump prep frame (0x15=21): uRam00039152 = 3 → DAT_4b0d[0x15] = 3
+HEAD_OFFSET_Y[0x15] = 3;
+
+// MP bar color tiers (palette indices → RGB from PAL file)
+const MP_COLOR_LOWEST = "#0000ff"; // pal[0x01] — below first threshold
+const MP_COLOR_MID = "#285dff"; // pal[0x68] — above first threshold
+const MP_COLOR_HIGH = "#00aaff"; // pal[0x6a] — above second threshold
+const MP_COLOR_FLASH = "#ffffff"; // pal[0x0f] — above third threshold + tick flash
+
 // ══════════════════════════════════════════════════════════════
 // Fighter slot fields (matching decompiled DAT_3463 offsets)
 // Stride: 0x1a words = 0x34 bytes per slot
@@ -240,8 +265,10 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		{ rgb: [97, 81, 113], part: "h2" }, // #615171 → shirt2
 		{ rgb: [105, 81, 113], part: "t1" }, // #695171 → pants1
 		{ rgb: [113, 81, 113], part: "t2" }, // #715171 → pants2
-		{ rgb: [113, 81, 105], part: "ol" }, // #715169 → outline
+		{ rgb: [113, 81, 105], part: "ew" }, // #715169 → eye white
+		{ rgb: [113, 81, 97], part: "mr" }, // #715161 → mouth red
 		{ rgb: [113, 81, 89], part: "ol" }, // #715159 → outline
+		{ rgb: [113, 81, 81], part: "hr" }, // #715151 → hair (per-character)
 	];
 
 	function getCharColors(
@@ -262,6 +289,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			t1: pal[t1] ?? [0, 0, 0],
 			t2: pal[t2] ?? [0, 0, 0],
 			ol: [0, 0, 0],
+			ew: [255, 255, 255],
+			mr: [255, 0, 0], // mouth red (#ff0000 = pal[0x1f=31], from line 17806)
+			hr: hairColors[charIdx] ?? [0, 0, 0], // hair: extracted from HEAD.GRH top rows
 		};
 		const colorMap = new Map<string, [number, number, number]>();
 		for (const { rgb, part } of BASE_MAP) {
@@ -334,6 +364,32 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		renderer.getOffscreenCtx().drawImage(recolorCanvas, dx, dy);
 	}
 
+	// Cached HUD portrait canvases (pre-rendered once per fighter)
+	const portraitCache = new Map<number, HTMLCanvasElement>();
+	function getPortraitCanvas(charIdx: number): HTMLCanvasElement | null {
+		if (portraitCache.has(charIdx)) return portraitCache.get(charIdx)!;
+		const actImg = assets.getImage("ACT1");
+		const headImgSrc = assets.getImage("HEAD");
+		const ch = ctx.characters[charIdx];
+		if (!actImg || !ch) return null;
+		const cvs = document.createElement("canvas");
+		cvs.width = ACT_SPR;
+		cvs.height = ACT_SPR;
+		const cctx = cvs.getContext("2d")!;
+		// Draw recolored body (ACT1 frame 0 at 1,1)
+		drawRecoloredSprite(actImg, ACT_PAD, ACT_PAD, 0, 0, false, charIdx);
+		cctx.drawImage(recolorCanvas, 0, 0);
+		// Draw head overlay on top
+		if (headImgSrc) {
+			const hi = ch.headPic;
+			const hsx = ((hi - 1) % 11) * 18 + 1;
+			const hsy = Math.floor((hi - 1) / 11) * 13 + 1;
+			cctx.drawImage(headImgSrc, hsx, hsy, 17, 12, 0, 0, 17, 12);
+		}
+		portraitCache.set(charIdx, cvs);
+		return cvs;
+	}
+
 	// Load game palette for color lookups
 	let gamePalette: [number, number, number][] | null = null;
 	{
@@ -350,6 +406,47 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				(g6 << 2) | (g6 >> 4),
 				(b6 << 2) | (b6 >> 4),
 			]);
+		}
+	}
+
+	// Extract hair color per character from HEAD.GRH top rows
+	const hairColors: [number, number, number][] = [];
+	{
+		const headImg = assets.getImage("HEAD");
+		const tmpCvs = document.createElement("canvas");
+		tmpCvs.width = 198;
+		tmpCvs.height = 65;
+		const tmpCtx = tmpCvs.getContext("2d")!;
+		if (headImg) tmpCtx.drawImage(headImg, 0, 0);
+		for (let ci = 0; ci < 11; ci++) {
+			const hp = ctx.characters[ci]?.headPic ?? ci + 1;
+			const hsx = ((hp - 1) % 11) * 18 + 1;
+			const hsy = Math.floor((hp - 1) / 11) * 13 + 1;
+			const counts = new Map<
+				string,
+				{ c: [number, number, number]; n: number }
+			>();
+			for (let y = 0; y < 3; y++) {
+				for (let x = 0; x < 17; x++) {
+					const d = tmpCtx.getImageData(hsx + x, hsy + y, 1, 1).data;
+					if (d[3] < 128) continue;
+					if (d[0] + d[1] + d[2] < 15) continue; // skip black
+					if (d[0] === 40 && d[1] === 40 && d[2] === 40) continue; // skip bg
+					const k = `${d[0]},${d[1]},${d[2]}`;
+					const e = counts.get(k);
+					if (e) e.n++;
+					else counts.set(k, { c: [d[0], d[1], d[2]], n: 1 });
+				}
+			}
+			let best: [number, number, number] = [0, 0, 0];
+			let bestN = 0;
+			for (const v of counts.values()) {
+				if (v.n > bestN) {
+					bestN = v.n;
+					best = v.c;
+				}
+			}
+			hairColors.push(best);
 		}
 	}
 
@@ -377,10 +474,25 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	let scrollX = 0; // DAT_3463_46e1
 	let exitFlag = 0; // DAT_3463_2ef6
 	let tickCount = 0; // DAT_3463_49b6
+	let tickParity = 0; // DAT_3463_46db — toggles 0/1 each tick, gates healing/idle
 	let paused = false;
 	let matchOver = false;
 	let done = false;
 	let winnerTeam = -1;
+
+	// MP bar color based on thresholds from character specials (line 18602-18641)
+	// 4 tiers: lowest (below sp0 cost), mid (above sp0), high (above sp1), flash (above sp2 + tick)
+	function getMpBarColor(charIdx: number, mp: number): string {
+		const ch = ctx.characters[charIdx];
+		if (!ch || !ch.specials || ch.specials.length === 0) return MP_COLOR_LOWEST;
+		const t0 = ch.specials[0]?.mpCost ?? 999;
+		const t1 = ch.specials[1]?.mpCost ?? 999;
+		const t2 = ch.specials[2]?.mpCost ?? 999;
+		if (mp >= t2 && tickParity === 1) return MP_COLOR_FLASH;
+		if (mp >= t1) return MP_COLOR_HIGH;
+		if (mp >= t0) return MP_COLOR_MID;
+		return MP_COLOR_LOWEST;
+	}
 
 	const humanPlayers = ctx.shared.humanPlayers ?? 1;
 	const totalSlots = ctx.shared.totalSlots ?? 2;
@@ -404,7 +516,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		s.v18 = charId; // 3418 = param_2
 		s.f6 = 0; // 33f6 = 0
 		s.f2 = 1; // 33f2 = 1 (human)
-		s.f4 = charId + 1; // 33f4: simplified skin index
+		s.f4 = ctx.characters[charId]?.headPic ?? charId + 1; // 33f4: from DATA.DAT Head:
 		s.v1a = 200; // 341a = 200 (max HP)
 		s.v16 = 200; // 3416 = 200 (current HP)
 		s.v20 = 100; // 3420: starting MP (pre-init value, line 17928)
@@ -430,14 +542,11 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		scrollX = 0; // DAT_3463_46e1 = 0
 		exitFlag = 0; // DAT_3463_2ef6
 
-		// Clear sound queue (line 18113-18114)
+		// Clear sound queue + f6 for all 30 slots (line 18113-18118)
 		for (let i = 0; i < MAX_SLOTS; i++) {
 			soundQueue[i] = 0;
-		}
-
-		// Clear slots 8+ (line 18116-18118)
-		for (let i = 8; i < MAX_SLOTS; i++) {
-			slots[i].f2 = 0;
+			slots[i].f6 = 0;
+			if (i >= 8) slots[i].f2 = 0;
 		}
 
 		// Reset fighter state for active slots (line 18158-18226)
@@ -554,9 +663,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	function handleWalk(p: number) {
 		const s = slots[p];
-		// Ground height cap: 3 for normal chars, 0 for types 8/9
-		let groundCap = 3;
-		if (s.v18 === 8 || s.v18 === 9) groundCap = 0;
+		// Ground level = 0 (decompiled: iVar5 = 3 for normal, 0 for types 8/9)
+		// But v00=0 is the actual ground in screen coords; iVar5=3 is a bounce threshold
+		const groundCap = 0;
 
 		// If fallen too far, remove (line 9455-9456)
 		if (s.v00 > 199) {
@@ -600,7 +709,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		}
 
 		// Spawn body hitbox when on ground and AI type (line 9513-9520)
-		if (s.v00 === groundCap && s.f2 === 2) {
+		if (s.v00 === groundCap && s.v04 >= 5) {
 			const dir =
 				s.v06 !== 0 ? (s.v06 > 0 ? 1 : -1) : Math.random() > 0.5 ? 1 : -1;
 			spawnHitbox(
@@ -663,38 +772,45 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	// FUN_161d_3555: Attack handler — state 10-19 (line 9780)
 	// ══════════════════════════════════════════════════════════
-	function handleAttack(p: number) {
+	// FUN_2b82_2ef7 → FUN_2b82_2f71: Command-driven attack for fighters
+	// Commands: 0xb = set v12 + spawn hitbox, 0xc = v14++
+	// Simplified: v14 advances each tick, hitbox at v14=13, recovery at v14=16
+	function handleFighterAttack(p: number) {
 		const s = slots[p];
-		const state = s.v14;
+		const dir = i16(s.v02);
 
-		// Attack animation progression
-		if (state === 11) {
-			// Find nearest enemy for attack targeting
-			let nearestDist = 9999;
-			for (let i = 0; i < MAX_FIGHTERS; i++) {
-				if (i === p || slots[i].f2 === 0) continue;
-				if (hud[i]?.v3c === hud[p]?.v3c) continue; // same team
-				const dx = abs16(slots[i].fc - s.fc);
-				const dy = abs16(slots[i].fe - s.fe);
-				const dist = dx + dy;
-				if (dist < nearestDist) {
-					nearestDist = dist;
-				}
-			}
-
-			// Spawn attack hitbox
-			const hbx = s.fc + s.v02 * 12;
-			spawnHitbox(hbx, s.fe, s.v00, 10, 8, s.v02, 0, 0, 1000 + 20, 25, p);
-			queueSound(1, s.fc);
-
-			s.v14 = 12; // advance attack state
-		} else if (state === 12) {
-			s.v12 = 5; // attack frame
+		if (s.v14 === 11) {
+			// Wind-up: set attack frame from char data (approximated)
+			s.v12 = 11;
+			s.v14 = 12;
+		} else if (s.v14 === 12) {
+			s.v12 = 12;
 			s.v14 = 13;
-		} else if (state === 13) {
-			s.v12 = 6;
+		} else if (s.v14 === 13) {
+			// Swing: spawn hitbox (FUN_2b82_2f71 case 0xb, line 24662)
+			// Hitbox: x=fc+dir*8, y=fe, z=v00-12, size 8x17,
+			// vel dir*5/-7, lifetime 25, damage 500
+			s.v12 = 13;
+			spawnHitbox(
+				s.fc + dir * 8,
+				s.fe,
+				s.v00 - 12,
+				8,
+				17,
+				dir,
+				dir * 5,
+				i16(0xfff9),
+				25,
+				500,
+				p,
+			);
+			s.v24 = 0x32; // priority/hitstun
+			queueSound(1, s.fc);
 			s.v14 = 14;
-		} else if (state >= 14 && state <= 19) {
+		} else if (s.v14 === 14) {
+			s.v12 = 14; // follow-through
+			s.v14 = 15;
+		} else if (s.v14 >= 15) {
 			// Recovery: return to idle
 			s.v14 = 1;
 			s.v12 = 1;
@@ -704,6 +820,15 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	// FUN_161d_42dc: Hit reaction — state 20-29 (line 10051)
 	// ══════════════════════════════════════════════════════════
+	// Entity attack handler (for f2==2 entities via updateEntity/FUN_161d_43d9)
+	function handleAttack(p: number) {
+		const s = slots[p];
+		s.v14++;
+		if (s.v14 >= 20) {
+			s.f2 = 0;
+		}
+	}
+
 	function handleHitReaction(p: number) {
 		const s = slots[p];
 
@@ -720,9 +845,15 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v00 = 1; // begin fall
 		}
 
-		// If state reaches 0x17 (23), clear slot (line 10067-10069)
-		if (s.v14 === 23) {
-			s.f2 = 0;
+		// At state 23: entities get cleared, fighters recover to idle
+		if (s.v14 >= 23) {
+			if (p >= MAX_FIGHTERS) {
+				s.f2 = 0; // entity: remove
+			} else {
+				s.v14 = 1; // fighter: back to idle
+				s.v12 = 1;
+			}
+			return;
 		}
 
 		// Advance state (line 10070-10071)
@@ -795,47 +926,82 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	}
 
 	// ══════════════════════════════════════════════════════════
-	// FUN_161d_43d9: Main per-slot update (line 10096)
-	// Physics integration + decade-bucketed state dispatch
+	// FUN_161d_db4a: Fighter update — for ALL fighters f2==1 (line 14200)
+	// This is the MAIN update for human AND AI fighters.
 	// ══════════════════════════════════════════════════════════
-	function updateSlot(p: number) {
+	function updateFighter(p: number) {
 		const s = slots[p];
 
-		// Accumulator: v00 += v0a (when v0a != 0) (line 10104-10108)
-		if (s.v0a !== 0) {
-			s.v00 = i16(s.v00 + s.v0a);
+		// Timer decrements (line 14338-14345)
+		if (s.v0c > 0) s.v0c--;
+		if (s.v22 > 0) s.v22--;
+
+		// Life counter regen (line 14346-14350)
+		if (s.f8 < s.fa) s.f8++;
+
+		// MP regen: +1 every other tick parity (line 14329-14337)
+		if (tickParity !== 0) {
+			if (s.v20 < s.v1e) s.v20++;
 		}
 
-		// Decade-bucketed state dispatch (line 10109-10122)
+		// State dispatch (FUN_161d_db4a line 14357-14474)
+		// Decades 3,4,5,6,8 have NO handler for fighters — fall through.
+		// Only specific decades have handlers:
 		const decade = Math.floor(s.v14 / 10);
-		if (s.v14 < 10) {
-			handleWalk(p);
+		if (decade === 0) {
+			// Inline idle check (line 14359-14365)
+			// In the original, calls FUN_25f1_2e1b to check special move buffer
 		} else if (decade === 1) {
-			handleAttack(p);
+			// Attack: FUN_2b82_2ef7 (command-driven animation)
+			// Simplified: advance v14 each tick, spawn hitbox at swing frame
+			handleFighterAttack(p);
 		} else if (decade === 2) {
-			handleHitReaction(p);
-		} else if (decade === 3) {
-			handleAirborne(p);
-		} else if (decade === 4) {
-			handleDeath(p);
+			// FUN_2b82_3129: state/animation setup
+			// After setup, typically advances to next state
+			s.v14++;
+			if (s.v14 >= 30) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
+		} else if (decade === 0x28) {
+			// Dead/KO: FUN_2b82_26ba
+			// Stay in death state, no recovery
 		}
 
-		// Special cleanup: type 0x15 not in hit reaction → clear (line 10124-10126)
-		if (decade !== 2 && s.v18 === 0x15) {
-			s.f2 = 0;
+		// Jump states (FUN_161d_7fc8, lines 11906-11917)
+		if (s.v14 === 0x47) {
+			s.v12 = 0x15;
+			s.v14 = 0x48;
+		} else if (s.v14 === 0x48) {
+			s.v0a = i16(0xfff3); // -13 launch
+			s.v12 = 0x14; // jump frame (20) — HEAD_OFFSET_Y[20]=0x32, head hidden
+			s.v14 = 1;
+		} else if (s.v14 === 0x4b) {
+			s.v14 = 1;
+			s.v12 = 1;
 		}
 
-		// Position integration: X += v06 (line 10128-10131)
-		if (s.v06 !== 0) {
-			s.fc = i16(s.fc + s.v06);
+		// Position integration (line 14475-14501) — BEFORE walk animation
+		if (s.v06 !== 0) s.fc += s.v06;
+		if (s.v08 !== 0) s.fe += s.v08;
+		if (s.v0a !== 0) s.v00 += s.v0a;
+
+		// Walk animation for fighters (when grounded and in walk state)
+		// v00 is now updated, so airborne fighters won't match v00===0
+		if (s.v14 >= 1 && s.v14 <= 6 && s.v00 === 0 && s.v0a === 0) {
+			if (s.v06 !== 0 || s.v08 !== 0) {
+				s.v14++;
+				if (s.v14 > 6) s.v14 = 1;
+				if (s.v14 === 1 || s.v14 === 6) s.v12 = 1;
+				else if (s.v14 === 3 || s.v14 === 4) s.v12 = 2;
+				else s.v12 = 3;
+			} else if (s.v12 < 4) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
 		}
 
-		// Position integration: Y += v08 (line 10133-10136)
-		if (s.v08 !== 0) {
-			s.fe = i16(s.fe + s.v08);
-		}
-
-		// Y clamping (line 10138-10145)
+		// Y clamping
 		const yMin = getYMin(stageIdx) - 3;
 		const yMax = getYMax(stageIdx) + 2;
 		if (s.fe < yMin) s.fe = yMin;
@@ -860,10 +1026,74 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			}
 		}
 
-		// Clear Y delta if slot was removed (line 10168-10170)
-		if (s.f2 === 0) {
-			s.v08 = 0;
+		// Landing (line 14514-14528)
+		if (s.v00 > 0) {
+			s.v0a = 0;
+			s.v00 = 0;
+			s.v12 = 0x15;
+			if (Math.floor(s.v14 / 10) !== 4 && Math.floor(s.v14 / 10) !== 0xc) {
+				s.v14 = 0x4b;
+			}
 		}
+
+		// Fall death (line 14529-14531)
+		if (s.v00 > 200) s.f2 = 0;
+
+		// Life timer death (line 14538-14541)
+		if (s.f8 < 1) {
+			s.v14 = 0x20;
+			s.f8 = 0;
+		}
+
+		// Friction (line 14548-14575)
+		if (abs16(s.v06) === 1) s.v06 = 0;
+		else if (s.v00 === 0 && s.v12 !== 0x15 && s.v06 !== 0) {
+			s.v06 = s.v06 > 0 ? s.v06 - 1 : s.v06 + 1;
+		}
+		if (abs16(s.v08) === 1) s.v08 = 0;
+		else if (s.v00 === 0 && s.v12 !== 0x15 && s.v08 !== 0) {
+			s.v08 = s.v08 > 0 ? s.v08 - 1 : s.v08 + 1;
+		}
+
+		// Gravity (line 14576-14580)
+		if (s.v0a !== 0 && s.v00 < 0) {
+			s.v0a += 3;
+		}
+
+		if (s.f2 === 0) s.v08 = 0;
+	}
+
+	// ══════════════════════════════════════════════════════════
+	// FUN_161d_43d9: Entity update — for spawned entities f2==2 (line 10096)
+	// ══════════════════════════════════════════════════════════
+	function updateEntity(p: number) {
+		const s = slots[p];
+
+		if (s.v0a !== 0) s.v00 = i16(s.v00 + s.v0a);
+
+		const decade = Math.floor(s.v14 / 10);
+		if (s.v14 < 10) handleWalk(p);
+		else if (decade === 1) handleAttack(p);
+		else if (decade === 2) handleHitReaction(p);
+		else if (decade === 3) handleAirborne(p);
+		else if (decade === 4) handleDeath(p);
+
+		if (decade !== 2 && s.v18 === 0x15) s.f2 = 0;
+
+		if (s.v06 !== 0) s.fc = i16(s.fc + s.v06);
+		if (s.v08 !== 0) s.fe = i16(s.fe + s.v08);
+
+		const yMin = getYMin(stageIdx) - 3;
+		const yMax = getYMax(stageIdx) + 2;
+		if (s.fe < yMin) s.fe = yMin;
+		if (s.fe > yMax) s.fe = yMax;
+
+		if (s.f8 < 9) {
+			if (s.fc <= scrollX - 0xbe) s.f2 = 0;
+			if (s.fc >= scrollX + 0x1fe) s.f2 = 0;
+		}
+
+		if (s.f2 === 0) s.v08 = 0;
 	}
 
 	// ══════════════════════════════════════════════════════════
@@ -971,73 +1201,66 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	function handleInput(p: number) {
 		const s = slots[p];
-		if (s.f2 !== 1) return; // only human slots
-		if (p >= humanPlayers) return;
+		if (s.f2 !== 1) return;
+		if (s.v04 >= 5) return;
 
-		const decade = Math.floor(s.v14 / 10);
+		// Movement state guard (line 19392):
+		// v14 < 5 || v14==0x47 || v14==0x48 || v14/10==0xd || v14==0xfb || v12==0x2f || v12==0x30
+		const canMove =
+			s.v14 < 5 ||
+			s.v14 === 0x47 ||
+			s.v14 === 0x48 ||
+			Math.floor(s.v14 / 10) === 0xd ||
+			s.v14 === 0xfb ||
+			s.v12 === 0x2f ||
+			s.v12 === 0x30;
 
-		// Can't control during hit reaction, death, or airborne
-		if (decade === 2 || decade === 4) return;
-		if (s.v00 > 3) return; // airborne from bounce
-
-		// Movement
-		const moveSpeed = 3;
-		let moving = false;
-
-		if (input.isAsciiDown(KEYS.LEFT[p])) {
-			s.v06 = -moveSpeed;
-			s.v02 = i16(0xffff); // face left
-			moving = true;
-		} else if (input.isAsciiDown(KEYS.RIGHT[p])) {
-			s.v06 = moveSpeed;
-			s.v02 = 1; // face right
-			moving = true;
-		} else {
-			if (decade < 1) s.v06 = 0; // stop if walking
+		// LEFT (line 19392-19407): v02=-1, if v06>-5 && v00==0 → v06=-5
+		if (canMove && input.isAsciiDown(KEYS.LEFT[p])) {
+			s.v02 = i16(0xffff);
+			if (s.v06 > -5 && s.v00 === 0) s.v06 = -5;
+		}
+		// RIGHT (line 19408-19423): v02=1, if v06<5 && v00==0 → v06=5
+		if (canMove && input.isAsciiDown(KEYS.RIGHT[p])) {
+			s.v02 = 1;
+			if (s.v06 < 5 && s.v00 === 0) s.v06 = 5;
+		}
+		// UP (line 19424-19438): if v08>-3 && v00==0 → v08=-3
+		if (canMove && input.isAsciiDown(KEYS.UP[p])) {
+			if (s.v08 > -3 && s.v00 === 0) s.v08 = -3;
+		}
+		// DOWN (line 19439-19453): if v08<3 && v00==0 → v08=3
+		if (canMove && input.isAsciiDown(KEYS.DOWN[p])) {
+			if (s.v08 < 3 && s.v00 === 0) s.v08 = 3;
 		}
 
-		if (input.isAsciiDown(KEYS.UP[p])) {
-			s.v08 = -2;
-			moving = true;
-		} else if (input.isAsciiDown(KEYS.DOWN[p])) {
-			s.v08 = 2;
-			moving = true;
-		} else {
-			if (decade < 1) s.v08 = 0;
-		}
-
-		// Defend (hold jump key while not jumping)
-		if (input.isAsciiDown(KEYS.JUMP[p]) && s.v00 <= 3 && decade === 0) {
-			s.v12 = 7; // defend frame
-			s.v0c = 2; // brief invulnerability
-		}
-
-		// Attack
-		if (input.isAsciiPressed(KEYS.ATTACK[p]) && decade < 1) {
-			s.v14 = 11; // enter attack state
-			s.v12 = 4; // attack wind-up frame
-			s.v06 = 0;
-			s.v08 = 0;
-		}
-
-		// Jump
+		// JUMP (line 19454-19480): v14<5 || v14/10==9 || v12==0x15
 		if (
 			input.isAsciiPressed(KEYS.JUMP[p]) &&
-			s.v00 <= 3 &&
-			decade < 1 &&
-			!input.isAsciiDown(KEYS.ATTACK[p])
+			(s.v14 < 5 || Math.floor(s.v14 / 10) === 9 || s.v12 === 0x15) &&
+			s.v00 === 0 &&
+			s.v20 > 9
 		) {
-			s.v0a = -9; // jump velocity (upward)
-			s.v00 = 0;
+			s.v20 -= 10;
+			s.v14 = 0x47;
 		}
 
-		// Walk animation when moving on ground
-		if (moving && decade === 0 && s.v00 <= 3) {
-			s.v14++;
-			if (s.v14 > 6) s.v14 = 1;
-			if (s.v14 === 1 || s.v14 === 6) s.v12 = 1;
-			else if (s.v14 === 3 || s.v14 === 4) s.v12 = 2;
-			else s.v12 = 3;
+		// ATTACK (line 19516-19526): v14<5 || v14==13 || v14==14 || v14==23 || v14==24 || v14/10==9
+		if (
+			input.isAsciiPressed(KEYS.ATTACK[p]) &&
+			(s.v14 < 5 ||
+				s.v14 === 13 ||
+				s.v14 === 14 ||
+				s.v14 === 23 ||
+				s.v14 === 24 ||
+				Math.floor(s.v14 / 10) === 9)
+		) {
+			s.v14 = 11;
+		}
+
+		// Air kick convert (line 19655-19660): if v14==11 && v00<0 → v14=0x15
+		if (s.v14 === 11 && s.v00 < 0) {
+			s.v14 = 0x15;
 		}
 	}
 
@@ -1046,12 +1269,12 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	function runAI(p: number) {
 		const s = slots[p];
-		if (s.f2 !== 2 && s.f2 !== 1) return;
-		if (p < humanPlayers && s.f2 === 1) return; // human-controlled
+		if (s.f2 !== 1) return;
+		if (s.v04 < 5) return; // human-controlled fighters don't use AI
 
 		const decade = Math.floor(s.v14 / 10);
 		if (decade === 2 || decade === 4) return; // hit/death: no AI
-		if (s.v00 > 3) return; // airborne
+		if (s.v00 !== 0) return; // airborne
 
 		// Find nearest enemy
 		let nearestDist = 9999;
@@ -1077,35 +1300,31 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		const dy = target.fe - s.fe;
 
 		if (abs16(dx) > 30) {
-			s.v06 = dx > 0 ? 2 : -2;
+			s.v06 = dx > 0 ? 5 : -5;
 		} else {
 			s.v06 = 0;
 		}
 
 		if (abs16(dy) > 8) {
-			s.v08 = dy > 0 ? 1 : -1;
+			s.v08 = dy > 0 ? 3 : -3;
 		} else {
 			s.v08 = 0;
 		}
 
-		// Attack when in range
+		// Attack when in range: randomly pick v14=11 or 21 (two attack types)
 		if (abs16(dx) < 28 && abs16(dy) < 12 && decade < 1) {
 			if (Math.random() < 0.15) {
 				s.v14 = 11;
-				s.v12 = 4;
-				s.v06 = 0;
-				s.v08 = 0;
 			}
 		}
 
-		// Occasional jump
-		if (Math.random() < 0.02 && s.v00 <= 3 && decade < 1) {
-			s.v0a = -9;
-			s.v00 = 0;
+		// Occasional jump (same 2-tick system)
+		if (Math.random() < 0.02 && s.v00 === 0 && decade < 1) {
+			s.v14 = 0x47; // jump prep
 		}
 
 		// Walk animation
-		if ((s.v06 !== 0 || s.v08 !== 0) && decade === 0 && s.v00 <= 3) {
+		if ((s.v06 !== 0 || s.v08 !== 0) && decade === 0 && s.v00 === 0) {
 			s.v14++;
 			if (s.v14 > 6) s.v14 = 1;
 			if (s.v14 === 1 || s.v14 === 6) s.v12 = 1;
@@ -1162,93 +1381,50 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	function gameTick() {
 		if (paused || matchOver) return;
 
-		tickCount++;
-
-		// Decrement invulnerability timers
-		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].v0c > 0) slots[i].v0c--;
+		// ── Step 1: Clear hitboxes + priority (line 19140-19145) ──
+		for (let i = 0; i < MAX_HITBOXES; i++) {
+			hitboxes[i].type = 0;
+		}
+		for (let i = 0; i < MAX_SLOTS; i++) {
+			slots[i].v24 = 0;
 		}
 
-		// Input + AI for each fighter (line 19319+)
+		// ── Step 2: Input for human fighters, AI for CPU fighters ──
 		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].f2 === 0) continue;
-			if (i < humanPlayers && slots[i].f2 === 1) {
+			if (slots[i].f2 !== 1) continue;
+			if (slots[i].v04 < 5) {
 				handleInput(i);
 			} else {
 				runAI(i);
 			}
 		}
 
-		// Update all active slots (line 19693+)
+		// ── Step 3: Toggle tick parity (line 19671-19674) ──
+		tickParity = 1 - tickParity;
+
+		// ── Step 4: Per-slot update (line 19677-19701) ──
 		for (let i = 0; i < MAX_SLOTS; i++) {
-			if (slots[i].f2 === 0) continue;
-			if (slots[i].f2 === 2 || slots[i].f2 === 4) {
-				updateSlot(i);
-			}
+			if (slots[i].f2 === 1) updateFighter(i);
+			else if (slots[i].f2 === 2) updateEntity(i);
 		}
 
-		// Update human fighter physics too
+		// ── Step 5: Collision detection for fighters only (line 19712-19773) ──
 		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].f2 === 1) {
-				// Gravity for human fighters
-				if (slots[i].v0a !== 0) {
-					slots[i].v00 += slots[i].v0a;
-				}
-				if (slots[i].v00 < 0) {
-					slots[i].v0a += 3; // gravity
-				}
-				if (slots[i].v00 >= 3 && slots[i].v0a > 0) {
-					// Land
-					slots[i].v00 = 3;
-					slots[i].v0a = 0;
-				}
-				// Position integration
-				if (slots[i].v06 !== 0) slots[i].fc += slots[i].v06;
-				if (slots[i].v08 !== 0) slots[i].fe += slots[i].v08;
-				// Y clamping
-				const yMin = getYMin(stageIdx) - 3;
-				const yMax = getYMax(stageIdx) + 2;
-				if (slots[i].fe < yMin) slots[i].fe = yMin;
-				if (slots[i].fe > yMax) slots[i].fe = yMax;
-				// X bounds
-				if (slots[i].fc < scrollX + 10) slots[i].fc = scrollX + 10;
-				if (slots[i].fc > scrollX + SCREEN_W - 10)
-					slots[i].fc = scrollX + SCREEN_W - 10;
-			}
-		}
-
-		// Collision detection (line 19693+)
-		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].f2 === 0) continue;
+			if (slots[i].f2 !== 1) continue;
 			detectCollisions(i);
 		}
 
-		// Hitbox lifetime / cleanup
-		for (let h = 0; h < MAX_HITBOXES; h++) {
-			if (hitboxes[h].type !== 0) {
-				hitboxes[h].v5a--;
-				if (hitboxes[h].v5a <= 0) {
-					hitboxes[h].type = 0;
-				}
-			}
-		}
-
-		// Passive MP regen: +1 per tick, capped at v1e (line 14331-14332)
-		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].f2 === 0) continue;
-			if (slots[i].v20 < slots[i].v1e) {
-				slots[i].v20++;
-			}
-		}
-
-		// Drain sound queue
-		drainSoundQueue();
-
-		// Camera scroll
+		// ── Step 6: Camera scroll (line 19774-19796) ──
 		updateScroll();
 
-		// Win check
+		// ── Step 7: Team tracking + tick counter (line 19797-19818) ──
 		checkWin();
+		if (matchOver || winnerTeam >= 0) {
+			tickCount++;
+		}
+
+		// ── Step 8: Sound drain (line 19856-19861) ──
+		drainSoundQueue();
 	}
 
 	// ══════════════════════════════════════════════════════════
@@ -1295,44 +1471,81 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			const s = slots[idx];
 			if (s.f2 === 0) continue;
 
-			// Invulnerability blink (line 18338): skip if v0c>0 and v0c is odd
-			if (s.v0c > 0 && s.v0c & 1) continue;
+			const isDead = Math.floor(s.v14 / 10) === 0x28;
+			const flip = i16(s.v02) < 0;
 
-			// Shadow (line 18294): at fc - 0xc + v02*-2, fe - 1
-			if (Math.floor(s.v14 / 10) !== 0x28) {
-				renderer.drawRect(
+			// ── Shadow — ALWAYS drawn, not gated by invuln (line 18293-18297) ──
+			// Source: 25x3 sprite from ACT1 at (1, 127), drawn at fc-0xc+v02*-2, fe-1
+			if (!isDead && actImg1) {
+				renderer.drawSprite(
+					actImg1,
+					1,
+					127,
+					25,
+					3,
 					s.fc - scrollX - 12 + i16(s.v02) * -2,
 					s.fe - 1,
-					25,
-					1,
-					"rgba(0,0,0,0.25)",
+					false,
 				);
 			}
 
-			// Sprite frame: v12 is 1-based (line 18361: iVar2 = v12 - 1)
+			// ── v22 hit-flash blink (line 18299-18302) ──
+			// v22 < 11 AND v22 is even → skip body+head
+			if (s.v22 < 11 && s.v22 % 2 === 0 && s.v22 > 0) continue;
+
+			// ── Fighter number text (line 18303-18336) ──
+			// Rendered from NEWFONTS.GRH (96x128, 16x16 grid of 6x8 cells)
+			// Text: v04 + '1' for humans, 'c' for CPU
+			// Position: fc - 2 + v02*-2, fe + v00 - 0x1e
+			if (idx < MAX_FIGHTERS && !isDead) {
+				const fontsImg = assets.getImage("NEWFONTS");
+				if (fontsImg) {
+					const charCode = s.v04 >= 5 ? 0x63 : s.v04 + 0x31; // 'c' or '1'-'8'
+					const fontCol = charCode % 16;
+					const fontRow = Math.floor(charCode / 16);
+					const fsx = fontCol * 6;
+					const fsy = fontRow * 8;
+					const facing = i16(s.v02);
+					const numX = s.fc - 2 + facing * -3 - scrollX;
+					const numY = s.fe + s.v00 - 0x1f;
+					renderer.drawImage(fontsImg, fsx, fsy, 4, 7, numX, numY);
+				}
+			}
+
+			// ── Invuln blink (line 18338-18340) — gates body+head only ──
+			// v0c < 1 OR v0c is even → draw; else skip body+head
+			if (s.v0c > 0 && s.v0c & 1) continue;
+
+			// ── Death state: special sprite (line 18281-18291) ──
+			if (isDead) {
+				// Blink: only draw if v00 > -50 AND (tickParity%2==0 OR v00 > -25)
+				if (s.v00 > -50 && (tickParity % 2 === 0 || s.v00 > -25)) {
+					// Death sprite from ACT1 source (1, 79), 25x25
+					if (actImg1) {
+						const drawX = s.fc - scrollX - 12;
+						const drawY = s.fe - 0x18; // NO v00 in Y for death
+						drawRecoloredSprite(actImg1, 1, 79, drawX, drawY, flip, s.v18);
+					}
+				}
+				continue; // no head overlay for dead fighters
+			}
+
+			// ── Body sprite (line 18360-18382) ──
 			let frame = s.v12 - 1;
 			if (frame < 0) frame = 0;
 
-			// Sheet: frames < 0x3d (61) = ACT1, else ACT2 (line 18360-18374)
 			const actImg = frame < ACT1_MAX ? actImg1 : actImg2;
 			const localFrame = frame < ACT1_MAX ? frame : frame - ACT1_MAX;
 
 			if (actImg) {
-				// Source rect (line 18377):
-				// (frame % 12) * 26 + 1, (frame / 12) * 26 + 1, size 25x25
 				const sx = (localFrame % ACT_COLS) * ACT_CELL + ACT_PAD;
 				const sy = Math.floor(localFrame / ACT_COLS) * ACT_CELL + ACT_PAD;
-				const flip = i16(s.v02) < 0;
-
-				// Draw position (line 18379-18382):
-				// X = fc - 0xc (12),  Y = fe + v00 - 0x18 (24)
 				const drawX = s.fc - scrollX - 12;
 				const drawY = s.fe + s.v00 - 0x18;
 
-				// Body sprite with per-fighter color replacement
-				if (actImg && idx < MAX_FIGHTERS) {
+				if (idx < MAX_FIGHTERS) {
 					drawRecoloredSprite(actImg, sx, sy, drawX, drawY, flip, s.v18);
-				} else if (actImg) {
+				} else {
 					renderer.drawSprite(
 						actImg,
 						sx,
@@ -1345,31 +1558,30 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 					);
 				}
 
-				// HEAD overlay (FUN_25f1_1d67, line 18412-18428)
-				// X = fc + facing*-4 + DAT_4b4a[v12]*facing - 8
-				// Y = fe + DAT_4b0d[v12] + v00 - 0x18
-				// DAT_4b4a/4b0d default to 0 for standing frames
-				// DAT_0094 = (facing-1)/2 controls head flip
-				if (idx < MAX_FIGHTERS) {
-					const ch = ctx.characters[s.v18];
+				// ── HEAD overlay (line 18412-18428) ──
+				// Condition: v12 < 61 AND DAT_4b0d[v12] < 50
+				// Position uses per-frame offset tables
+				const fi = s.v12;
+				// HEAD overlay (line 18412-18428)
+				// Condition: v12 < 0x3d AND (byte)DAT_4b0d[v12] < 0x32
+				// Source: from HEAD.GRH using f4 (skin variant), NOT charIdx
+				// Position: fc + v02*-4 + DAT_4b4a[v12]*v02 - 8, fe + DAT_4b0d[v12] + v00 - 0x18
+				if (
+					idx < MAX_FIGHTERS &&
+					fi > 0 &&
+					fi < 61 &&
+					HEAD_OFFSET_Y[fi] < 0x32
+				) {
 					const hImg = assets.getImage("HEAD");
-					if (ch && hImg) {
-						const hi = ch.headPic;
-						const hsx = ((hi - 1) % 11) * 18 + 1;
-						const hsy = Math.floor((hi - 1) / 11) * 13 + 1;
+					if (hImg) {
+						const f4 = s.f4;
+						const hsx = ((f4 - 1) % 11) * 18 + 1;
+						const hsy = Math.floor((f4 - 1) / 11) * 13 + 1;
 						const facing = i16(s.v02);
-						const headScreenX = s.fc + facing * -4 - 8 - scrollX;
-						const headScreenY = s.fe + s.v00 - 0x18;
-						renderer.drawSprite(
-							hImg,
-							hsx,
-							hsy,
-							17,
-							12,
-							headScreenX,
-							headScreenY,
-							flip,
-						);
+						const headX =
+							s.fc + facing * -4 + HEAD_OFFSET_X[fi] * facing - 8 - scrollX;
+						const headY = s.fe + HEAD_OFFSET_Y[fi] + s.v00 - 0x18;
+						renderer.drawSprite(hImg, hsx, hsy, 17, 12, headX, headY, flip);
 					}
 				}
 			}
@@ -1381,39 +1593,15 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		if (menuImg) renderer.drawFullImage(menuImg, 0, HUD_Y);
 
 		// Step 2: Character portraits in HUD (FUN_25f1_00e1, line 17432-17442)
-		// Draw ACT1 body (1,1) 25x25 with per-fighter color replacement,
-		// then HEAD overlay (17x12) on top
-		{
-			const hudActImg = assets.getImage("ACT1");
-			const hudHeadImg = assets.getImage("HEAD");
-			for (let i = 0; i < MAX_FIGHTERS; i++) {
-				if (slots[i].f2 === 0) continue;
-				const ch = ctx.characters[slots[i].v18];
-				if (!ch) continue;
-				const col = i % 4;
-				const row = Math.floor(i / 4);
-				const dx = col * 0x50 + 6;
-				const dy = row * 0x1b + 3;
-				// Body: ACT1 frame 0 at (1,1), recolored per fighter
-				if (hudActImg) {
-					drawRecoloredSprite(
-						hudActImg,
-						ACT_PAD,
-						ACT_PAD,
-						dx,
-						dy,
-						false,
-						slots[i].v18,
-					);
-				}
-				// HEAD overlay at same position as body (line 17441-17442)
-				if (hudHeadImg) {
-					const hi = ch.headPic;
-					const hsx = ((hi - 1) % 11) * 18 + 1;
-					const hsy = Math.floor((hi - 1) / 11) * 13 + 1;
-					renderer.drawImage(hudHeadImg, hsx, hsy, 17, 12, dx, dy);
-				}
-			}
+		// Uses cached pre-rendered portrait (body recolored + HEAD overlay)
+		for (let i = 0; i < MAX_FIGHTERS; i++) {
+			if (slots[i].f2 === 0) continue;
+			const col = i % 4;
+			const row = Math.floor(i / 4);
+			const dx = col * 0x50 + 6;
+			const dy = row * 0x1b + 3;
+			const pcvs = getPortraitCanvas(slots[i].v18);
+			if (pcvs) renderer.getOffscreenCtx().drawImage(pcvs, dx, dy);
 		}
 
 		// Step 3: HP bars ON TOP of MENU (line 18578-18589)
@@ -1436,7 +1624,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				const mpBarBaseY = Math.floor(i / 4) * 0x1b + 0x14;
 				const mpScale = hud[i].v44 > 0 ? hud[i].v44 : 50;
 				const mpW = Math.max(0, Math.floor((slots[i].v20 * 10) / mpScale));
-				renderer.drawRect(hpBarX, mpBarBaseY, mpW, 5, "#00aaff");
+				const mpColor = getMpBarColor(slots[i].v18, slots[i].v20);
+				renderer.drawRect(hpBarX, mpBarBaseY, mpW, 5, mpColor);
 			}
 		}
 
@@ -1489,9 +1678,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		const y = getYMax(stageIdx) - i * 3;
 		initFighter(i, charId, x, y);
 
-		// Set as AI if past human player count
+		// AI fighters: f2=1 (same as human) but v04>=5 distinguishes CPU
 		if (i >= humanPlayers) {
-			slots[i].f2 = 2; // AI type
+			slots[i].v04 = 5; // CPU fighter (v04 < 5 = human, v04 >= 5 = AI)
 		}
 
 		// Team assignment
@@ -1506,16 +1695,20 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	// Main loop (FUN_25f1_32be)
 	// ══════════════════════════════════════════════════════════
+	// From decompiled line 19863-19874: game loop waits for 2 PIT ticks
+	// per frame. PIT runs at 18.2 Hz, so game logic runs every 2 ticks.
+	let pitTickAccum = 0;
+
 	return new Promise<void>((resolve) => {
 		function frame() {
-			if (done) return;
+			if (done || ctx.signal.aborted) return;
 
 			const ticks = timer.update();
 			for (let t = 0; t < ticks; t++) {
 				if (done) break;
 				input.startTick();
 
-				// Pause handling
+				// Pause handling (checked every PIT tick for responsiveness)
 				if (input.isAsciiPressed(KEYS.ESCAPE)) {
 					if (paused) {
 						paused = false;
@@ -1542,7 +1735,12 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 					continue;
 				}
 
-				gameTick();
+				// Run game logic every 2 PIT ticks (line 19871: while delta < 2)
+				pitTickAccum++;
+				if (pitTickAccum >= 2) {
+					pitTickAccum = 0;
+					gameTick();
+				}
 			}
 
 			render();
