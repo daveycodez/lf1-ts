@@ -1168,7 +1168,11 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		if (s.fe < yMin) s.fe = yMin;
 		if (s.fe > yMax) s.fe = yMax;
 
-		// X bounds (line 10146-10166)
+		// Fighter X clamping to visible screen edges
+		if (s.fc < scrollX) s.fc = scrollX;
+		if (s.fc > scrollX + SCREEN_W) s.fc = scrollX + SCREEN_W;
+
+		// X bounds — remove fighters that escape (line 10146-10166)
 		if (s.f8 < 9) {
 			if (s.fc <= scrollX - 0xbe) s.f2 = 0;
 			if (s.fc >= scrollX + 0x1fe) s.f2 = 0;
@@ -1532,24 +1536,39 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	}
 
 	// ══════════════════════════════════════════════════════════
-	// Scroll camera (from FUN_25f1_32be rendering setup)
+	// Scroll camera (from FUN_25f1_32be lines 19702-19795)
+	// Tracks average X of alive human players (or all if no humans).
+	// Smooth 1/6 interpolation with clamped max scroll speed.
 	// ══════════════════════════════════════════════════════════
 	function updateScroll() {
-		let minX = 9999,
-			maxX = -9999;
-		let alive = 0;
+		let sumAll = 0,
+			countAll = 0;
+		let sumHuman = 0,
+			countHuman = 0;
 		for (let i = 0; i < MAX_FIGHTERS; i++) {
-			if (slots[i].f2 !== 0 && slots[i].v16 > 0) {
-				minX = Math.min(minX, slots[i].fc);
-				maxX = Math.max(maxX, slots[i].fc);
-				alive++;
+			if (slots[i].f2 === 1 && Math.floor(slots[i].v14 / 10) !== 0x28) {
+				sumAll += slots[i].fc;
+				countAll++;
+				if (slots[i].v04 < 5) {
+					sumHuman += slots[i].fc;
+					countHuman++;
+				}
 			}
 		}
-		if (alive === 0) return;
-		const center = Math.floor((minX + maxX) / 2);
-		const targetX = Math.max(0, Math.min(SCREEN_W, center - SCREEN_W / 2));
-		scrollX +=
-			Math.sign(targetX - scrollX) * Math.min(2, abs16(targetX - scrollX));
+		if (countHuman > 0) {
+			sumAll = sumHuman;
+			countAll = countHuman;
+		}
+		if (countAll < 1) return;
+		const avgX = Math.floor(sumAll / countAll);
+		const target = avgX - SCREEN_W / 2;
+		let delta = Math.floor((target - scrollX) / 6);
+		if (delta > 0xa0) delta = 0xa0;
+		if (delta < -0xa0) delta = -0xa0;
+		scrollX += delta;
+		// Clamp scroll to background bounds (two 320px images = 640px world)
+		if (scrollX < 0) scrollX = 0;
+		if (scrollX > SCREEN_W) scrollX = SCREEN_W;
 	}
 
 	// ══════════════════════════════════════════════════════════
