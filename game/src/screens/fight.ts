@@ -461,6 +461,42 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		}
 	}
 
+	// ── Per-player input history buffer (FUN_25f1_2dd2, line 18880) ──
+	// 5-char ring buffer at 0x4d2b + player*5, stores last 5 key events
+	const inputBuf: string[][] = Array.from({ length: 8 }, () => [
+		" ",
+		" ",
+		" ",
+		" ",
+		" ",
+	]);
+
+	function pushInput(player: number, ch: string) {
+		const buf = inputBuf[player];
+		buf[0] = buf[1];
+		buf[1] = buf[2];
+		buf[2] = buf[3];
+		buf[3] = buf[4];
+		buf[4] = ch;
+	}
+
+	// Triple-tap run detection (FUN_25f1_2e1b, line 18897)
+	// Returns true if last 3 input buffer entries are 'aaa' or 'ddd'.
+	// Running costs 1 HP per tick for human players.
+	function checkTripleTapRun(p: number): boolean {
+		const buf = inputBuf[p];
+		const s = slots[p];
+		if (buf[4] === "a" && buf[3] === "a" && buf[2] === "a" && s.v20 > 1) {
+			if (s.v04 < 5) s.v20--;
+			return true;
+		}
+		if (buf[4] === "d" && buf[3] === "d" && buf[2] === "d" && s.v20 > 1) {
+			if (s.v04 < 5) s.v20--;
+			return true;
+		}
+		return false;
+	}
+
 	// ── Game state arrays (matching DAT_3463 data segment) ──
 	const slots: Slot[] = Array.from({ length: MAX_SLOTS }, mkSlot);
 	const hitboxes: Hitbox[] = Array.from({ length: MAX_HITBOXES }, mkHitbox);
@@ -823,46 +859,101 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// FUN_2b82_2ef7 → FUN_2b82_2f71: Command-driven attack for fighters
 	// Commands: 0xb = set v12 + spawn hitbox, 0xc = v14++
 	// Simplified: v14 advances each tick, hitbox at v14=13, recovery at v14=16
+	// FUN_161d_8779 (line 12129): Fighter attack handler
+	// Both variants (v14=11 slow, v14=21 fast) share this handler.
+	// v14 increments each tick. Visual attack at v14=21-25. Hitbox at v12=9 or 11.
 	function handleFighterAttack(p: number) {
 		const s = slots[p];
 		const dir = i16(s.v02);
 
-		if (s.v14 === 11) {
-			// Wind-up: set attack frame from char data (approximated)
-			s.v12 = 11;
-			s.v14 = 12;
-		} else if (s.v14 === 12) {
-			s.v12 = 12;
-			s.v14 = 13;
-		} else if (s.v14 === 13) {
-			// Swing: spawn hitbox (FUN_2b82_2f71 case 0xb, line 24662)
-			// Hitbox: x=fc+dir*8, y=fe, z=v00-12, size 8x17,
-			// vel dir*5/-7, lifetime 25, damage 500
-			s.v12 = 13;
+		let dmg = 0x19;
+		let hw = 5;
+		let hh = 6;
+		if (s.v00 < 0) {
+			dmg = 0x23;
+			hw = 7;
+			if (s.v0a > 0) hh = 0x0c;
+		}
+
+		if (s.v00 === 0 && !checkTripleTapRun(p)) {
+			s.v06 = Math.floor(s.v06 / 4);
+		}
+		if (s.v12 === 0x15) {
+			s.v12 = 1;
+			s.v14 = 0;
+			return;
+		}
+
+		// Punch variant (v14=11-15): same structure as kick but offset by 4
+		// v12 = random*2 + 4 → (4 or 6), hitbox at v12=(5 or 7)
+		if (s.v14 === 0x0b) {
+			s.v12 = (Math.random() < 0.5 ? 0 : 1) * 2 + 4;
+		}
+		if (s.v14 === 0x0c) {
+			queueSound(1, s.fc);
+			s.v12++;
+		}
+		if (s.v14 === 0x0e) {
+			s.v12--;
+		}
+		if (s.v14 === 0x0f) {
+			s.v14 = 0;
+			s.v12 = 1;
+			return;
+		}
+		if (s.v14 >= 0x0b && s.v14 <= 0x0f && (s.v12 === 5 || s.v12 === 7)) {
 			spawnHitbox(
 				s.fc + dir * 8,
 				s.fe,
-				s.v00 - 12,
-				8,
-				17,
+				s.v00 - 4,
+				hw,
+				hh,
 				dir,
 				dir * 5,
 				i16(0xfff9),
-				25,
-				500,
+				7,
+				dmg,
 				p,
 			);
-			s.v24 = 0x32; // priority/hitstun
+			if (s.v06 === 0) s.v06 = dir * 2;
+		}
+
+		// Kick variant (v14=21-25): v12=8/10 → v12=9/11 (strike) → hold → retract → idle
+		if (s.v14 === 0x15) {
+			s.v12 = (Math.random() < 0.5 ? 0 : 1) * 2 + 8;
+		}
+		if (s.v14 === 0x16) {
 			queueSound(1, s.fc);
-			s.v14 = 14;
-		} else if (s.v14 === 14) {
-			s.v12 = 14; // follow-through
-			s.v14 = 15;
-		} else if (s.v14 >= 15) {
-			// Recovery: return to idle
-			s.v14 = 1;
+			s.v12++;
+		}
+		if (s.v14 === 0x18) {
+			s.v12--;
+		}
+		let hitType = 7;
+		if (s.v14 > 0x16) hitType = 0x37d + 7;
+		if (s.v14 === 0x19) {
+			s.v14 = 0;
 			s.v12 = 1;
 		}
+
+		if (s.v12 === 9 || s.v12 === 11) {
+			spawnHitbox(
+				s.fc + dir * 8,
+				s.fe,
+				s.v00 - 4,
+				hw,
+				hh,
+				dir,
+				dir * 5,
+				i16(0xfff9),
+				hitType,
+				dmg,
+				p,
+			);
+			if (s.v06 === 0) s.v06 = dir * 2;
+		}
+
+		s.v14++;
 	}
 
 	// ══════════════════════════════════════════════════════════
@@ -1000,20 +1091,43 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			// Inline idle check (line 14359-14365)
 			// In the original, calls FUN_25f1_2e1b to check special move buffer
 		} else if (decade === 1) {
-			// Attack: FUN_2b82_2ef7 (command-driven animation)
-			// Simplified: advance v14 each tick, spawn hitbox at swing frame
+			// Attack decade 1: FUN_161d_8779 (line 12129)
 			handleFighterAttack(p);
 		} else if (decade === 2) {
-			// FUN_2b82_3129: state/animation setup
-			// After setup, typically advances to next state
-			s.v14++;
-			if (s.v14 >= 30) {
+			// Decade 2 is shared: attack continuation (v14=21-25) vs hit stun (v14=20)
+			if (s.v14 === 20) {
+				// Hit stun (from collision, line 10059): show recoil frames
+				s.v12 = 5;
+				s.v14++;
+			} else if (s.v14 <= 0x19) {
+				// Attack continuation (v14=21-25): same handler as decade 1
+				handleFighterAttack(p);
+			} else {
+				// Stun recovery (v14 > 25)
 				s.v14 = 1;
 				s.v12 = 1;
 			}
 		} else if (decade === 0x28) {
 			// Dead/KO: FUN_2b82_26ba
-			// Stay in death state, no recovery
+		} else if (decade === 9) {
+			// Run state (FUN_161d_7bdd, line 11770)
+			// Original calls FUN_25f1_2e1b TWICE: line 11778 and line 11802
+			const run1 = checkTripleTapRun(p);
+			if (run1) {
+				if (inputBuf[p][4] === "a") s.v02 = i16(0xffff);
+				else s.v02 = 1;
+			}
+			s.v06 = i16(s.v02) * 8;
+			s.v14++;
+			if (s.v14 >= 0x5f) s.v14 = 0x5b;
+			s.v12 = s.v14 - 0x2f;
+			if (s.v12 === 0x2f) s.v12 = 0x2d;
+			if (s.v12 === 0x2d) queueSound(0x10, s.fc);
+			const run2 = checkTripleTapRun(p);
+			if (!run2 || s.v00 !== 0) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
 		}
 
 		// Jump states (FUN_161d_7fc8, lines 11906-11917)
@@ -1021,9 +1135,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v12 = 0x15;
 			s.v14 = 0x48;
 		} else if (s.v14 === 0x48) {
-			s.v0a = i16(0xfff3); // -13 launch
-			s.v12 = 0x14; // jump frame (20) — HEAD_OFFSET_Y[20]=0x32, head hidden
-			s.v14 = 1;
+			s.v0a = i16(0xfff3); // -13 launch velocity (line 11907)
+			s.v14 = 1; // back to normal, now airborne (line 11908)
 		} else if (s.v14 === 0x4b) {
 			s.v14 = 1;
 			s.v12 = 1;
@@ -1034,21 +1147,18 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		if (s.v08 !== 0) s.fe += s.v08;
 		if (s.v0a !== 0) s.v00 += s.v0a;
 
-		// Fighter walk animation (simplified from FUN_25f1_2a27 / FUN_2b82_2978)
-		// Fighters use v14=0 for idle. Walk frames cycle v12 through 1-3 based on movement.
-		// Landing resets v12=1, v14=0 (line 12083-12085)
-		if (s.v12 === 0x15 && s.v00 === 0) {
-			s.v12 = 1;
-			s.v14 = 0;
-		}
-		if (s.v14 < 5 && s.v00 === 0 && s.v0a === 0) {
+		// Walk animation (FUN_161d_7dd8, line 11848)
+		if (s.v14 < 5) {
+			if (s.v12 === 0x15) s.v12 = 1;
 			if (s.v06 !== 0 || s.v08 !== 0) {
-				// Walking: cycle v12 through 1→2→3→1
-				s.v12++;
-				if (s.v12 > 3) s.v12 = 1;
-			} else {
-				// Idle: v12=1 (standing)
-				s.v12 = 1;
+				s.v0e++;
+				if (s.v0e >= 5) s.v0e = 1;
+				s.v12 = s.v0e;
+				if (s.v12 === 4) s.v12 = 2;
+			}
+			// Airborne frame (line 11890-11892)
+			if (s.v00 < 0) {
+				s.v12 = 0x14;
 			}
 		}
 
@@ -1248,15 +1358,43 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	}
 
 	// ══════════════════════════════════════════════════════════
-	// Input handling (from FUN_25f1_32be key dispatch)
+	// Input handling (from FUN_25f1_32be, line 19086)
+	// Two layers: key EVENT pushed to buffer, held-key for sustained movement
 	// ══════════════════════════════════════════════════════════
-	function handleInput(p: number) {
+	function handleInput(p: number, tickKey: number) {
 		const s = slots[p];
 		if (s.f2 !== 1) return;
-		if (s.v04 >= 5) return; // v04 >= 5 = CPU (line 19324)
-		const ki = s.v04; // key index from player controller position (0, 1, 2)
+		if (s.v04 >= 5) return;
+		const ki = s.v04;
 
-		// Movement state guard (line 19392):
+		// Phase 1: Map this tick's key event to an action char and push to buffer
+		let action = "";
+		if (tickKey === KEYS.UP[ki]) {
+			action = "w";
+			pushInput(p, "w");
+		}
+		if (tickKey === KEYS.LEFT[ki]) {
+			action = "a";
+			pushInput(p, "a");
+		}
+		if (tickKey === KEYS.RIGHT[ki]) {
+			action = "d";
+			pushInput(p, "d");
+		}
+		if (tickKey === KEYS.DOWN[ki]) {
+			action = "x";
+			pushInput(p, "x");
+		}
+		if (tickKey === KEYS.ATTACK[ki]) {
+			action = "s";
+			pushInput(p, "s");
+		}
+		if (tickKey === KEYS.JUMP[ki]) {
+			action = "t";
+			pushInput(p, "t");
+		}
+
+		// Phase 2: Movement from held keys OR key event (line 19392-19453)
 		const canMove =
 			s.v14 < 5 ||
 			s.v14 === 0x47 ||
@@ -1266,29 +1404,30 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v12 === 0x2f ||
 			s.v12 === 0x30;
 
-		// LEFT (line 19392-19407)
-		if (canMove && input.isAsciiDown(KEYS.LEFT[ki])) {
-			s.v02 = i16(0xffff);
-			if (s.v06 > -5 && s.v00 === 0) s.v06 = -5;
-		}
-		// RIGHT (line 19408-19423)
-		if (canMove && input.isAsciiDown(KEYS.RIGHT[ki])) {
-			s.v02 = 1;
-			if (s.v06 < 5 && s.v00 === 0) s.v06 = 5;
-		}
-		// UP (line 19424-19438)
-		if (canMove && input.isAsciiDown(KEYS.UP[ki])) {
-			if (s.v08 > -3 && s.v00 === 0) s.v08 = -3;
-		}
-		// DOWN (line 19439-19453)
-		if (canMove && input.isAsciiDown(KEYS.DOWN[ki])) {
-			if (s.v08 < 3 && s.v00 === 0) s.v08 = 3;
+		if (canMove) {
+			if (input.isAsciiDown(KEYS.LEFT[ki]) || action === "a") {
+				s.v02 = i16(0xffff);
+				if (s.v06 > -5 && s.v00 === 0) s.v06 = -5;
+			}
+			if (input.isAsciiDown(KEYS.RIGHT[ki]) || action === "d") {
+				s.v02 = 1;
+				if (s.v06 < 5 && s.v00 === 0) s.v06 = 5;
+			}
+			if (input.isAsciiDown(KEYS.UP[ki]) || action === "w") {
+				if (s.v08 > -3 && s.v00 === 0) s.v08 = -3;
+			}
+			if (input.isAsciiDown(KEYS.DOWN[ki]) || action === "x") {
+				if (s.v08 < 3 && s.v00 === 0) s.v08 = 3;
+			}
 		}
 
-		// JUMP (line 19454-19480)
+		// Phase 3: JUMP key (line 19454-19480) — costs MP (DAT_3463_3420 = v20)
+		// Guards: idle (v14<5), running (decade 9), or grabbed (v12==0x15 but NOT jump prep)
 		if (
-			input.isAsciiPressed(KEYS.JUMP[ki]) &&
-			(s.v14 < 5 || Math.floor(s.v14 / 10) === 9 || s.v12 === 0x15) &&
+			action === "t" &&
+			(s.v14 < 5 ||
+				Math.floor(s.v14 / 10) === 9 ||
+				(s.v12 === 0x15 && s.v14 !== 0x47 && s.v14 !== 0x48)) &&
 			s.v00 === 0 &&
 			s.v20 > 9
 		) {
@@ -1296,9 +1435,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v14 = 0x47;
 		}
 
-		// ATTACK (line 19516-19526)
+		// Phase 4: ATTACK key (line 19516-19526) — random variant 11 or 21
 		if (
-			input.isAsciiPressed(KEYS.ATTACK[ki]) &&
+			action === "s" &&
 			(s.v14 < 5 ||
 				s.v14 === 13 ||
 				s.v14 === 14 ||
@@ -1306,10 +1445,18 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				s.v14 === 24 ||
 				Math.floor(s.v14 / 10) === 9)
 		) {
-			s.v14 = 11;
+			s.v14 = (Math.random() < 0.5 ? 0 : 1) * 10 + 0xb;
 		}
 
-		// Air kick convert (line 19655-19660): if v14==11 && v00<0 → v14=0x15
+		// Phase 5: Run initiation (line 14359-14364)
+		// If idle and triple-tap detected and grounded, enter run state
+		if (s.v14 < 5 && s.v00 === 0) {
+			if (checkTripleTapRun(p)) {
+				s.v14 = 0x5b;
+			}
+		}
+
+		// Phase 6: Air kick convert (line 19655-19660)
 		if (s.v14 === 11 && s.v00 < 0) {
 			s.v14 = 0x15;
 		}
@@ -1440,11 +1587,14 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			slots[i].v24 = 0;
 		}
 
-		// ── Step 2: Input for human fighters, AI for CPU fighters ──
+		// ── Step 2: Read key event ONCE, then dispatch to all players ──
+		// From decompiled FUN_25f1_32be: key is read once per tick (FUN_152b_0ed9),
+		// then each player checks if it matches their key config.
+		const tickKey = input.inkey();
 		for (let i = 0; i < MAX_FIGHTERS; i++) {
 			if (slots[i].f2 !== 1) continue;
 			if (slots[i].v04 < 5) {
-				handleInput(i);
+				handleInput(i, tickKey);
 			} else {
 				runAI(i);
 			}
@@ -1781,9 +1931,16 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			const ticks = timer.update();
 			for (let t = 0; t < ticks; t++) {
 				if (done) break;
+
+				// Game logic runs every 2 PIT ticks (line 19871: while delta < 2)
+				pitTickAccum++;
+				if (pitTickAccum < 2) continue;
+				pitTickAccum = 0;
+
+				// Pop key from queue only when we'll actually process it
+				// (matches decompiled: FUN_152b_0ed9 called once per game frame)
 				input.startTick();
 
-				// Pause handling (checked every PIT tick for responsiveness)
 				if (input.isAsciiPressed(KEYS.ESCAPE)) {
 					if (paused) {
 						paused = false;
@@ -1810,12 +1967,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 					continue;
 				}
 
-				// Run game logic every 2 PIT ticks (line 19871: while delta < 2)
-				pitTickAccum++;
-				if (pitTickAccum >= 2) {
-					pitTickAccum = 0;
-					gameTick();
-				}
+				gameTick();
 			}
 
 			render();
