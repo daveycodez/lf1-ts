@@ -715,7 +715,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		vx: number,
 		vy: number,
 		type: number,
-		lifetime: number,
+		v5a: number,
 		owner: number,
 	): number {
 		for (let i = 0; i < MAX_HITBOXES; i++) {
@@ -729,7 +729,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				hitboxes[i].v54 = vx;
 				hitboxes[i].v56 = vy;
 				hitboxes[i].type = type;
-				hitboxes[i].v5a = lifetime;
+				hitboxes[i].v5a = v5a;
 				hitboxes[i].owner = owner;
 				return i;
 			}
@@ -869,11 +869,13 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		const s = slots[p];
 		const dir = i16(s.v02);
 
-		let dmg = 0x19;
+		// C local_4 → v5a (life counter drain + flags), NOT HP damage.
+		// HP damage = hb.type % 1000 = iVar2+7 = 7.
+		let v5a = 0x19;
 		let hw = 5;
 		let hh = 6;
 		if (s.v00 < 0) {
-			dmg = 0x23;
+			v5a = 0x23;
 			hw = 7;
 			if (s.v0a > 0) hh = 0x0c;
 		}
@@ -887,14 +889,31 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			return;
 		}
 
-		// Punch variant (v14=11-15): same structure as kick but offset by 4
-		// v12 = random*2 + 4 → (4 or 6), hitbox at v12=(5 or 7)
+		// Punch (v14=0x0b-0x0f): command-executor driven, hitbox spawned ONCE on
+		// the transition frame (v14=0x0c) when v12 becomes 5 or 7.
+		// In C, FUN_2b82_2ef7 → FUN_2b82_2f71 spawns as a one-shot command.
 		if (s.v14 === 0x0b) {
 			s.v12 = (Math.random() < 0.5 ? 0 : 1) * 2 + 4;
 		}
 		if (s.v14 === 0x0c) {
 			queueSound(1, s.fc);
 			s.v12++;
+			if (s.v12 === 5 || s.v12 === 7) {
+				spawnHitbox(
+					s.fc + dir * 8,
+					s.fe,
+					s.v00 - 4,
+					hw,
+					hh,
+					dir,
+					dir * 5,
+					i16(0xfff9),
+					7,
+					v5a,
+					p,
+				);
+				if (s.v06 === 0) s.v06 = dir * 2;
+			}
 		}
 		if (s.v14 === 0x0e) {
 			s.v12--;
@@ -904,24 +923,11 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v12 = 1;
 			return;
 		}
-		if (s.v14 >= 0x0b && s.v14 <= 0x0f && (s.v12 === 5 || s.v12 === 7)) {
-			spawnHitbox(
-				s.fc + dir * 8,
-				s.fe,
-				s.v00 - 4,
-				hw,
-				hh,
-				dir,
-				dir * 5,
-				i16(0xfff9),
-				7,
-				dmg,
-				p,
-			);
-			if (s.v06 === 0) s.v06 = dir * 2;
-		}
 
-		// Kick variant (v14=21-25): v12=8/10 → v12=9/11 (strike) → hold → retract → idle
+		// Kick (v14=0x15-0x19): FUN_161d_8779 spawns hitbox every frame v12==9/11.
+		// Frame 1 (v14=0x16): type = 0+7 = 7 → deals damage.
+		// Frame 2+ (v14>0x16): type = 0x37d+7 = 900 → ghost hitbox, no damage
+		// (C line 8565: hb.type==900 routes to special/no-damage branch).
 		if (s.v14 === 0x15) {
 			s.v12 = (Math.random() < 0.5 ? 0 : 1) * 2 + 8;
 		}
@@ -932,14 +938,13 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		if (s.v14 === 0x18) {
 			s.v12--;
 		}
-		let hitType = 7;
-		if (s.v14 > 0x16) hitType = 0x37d + 7;
 		if (s.v14 === 0x19) {
 			s.v14 = 0;
 			s.v12 = 1;
 		}
 
 		if (s.v12 === 9 || s.v12 === 11) {
+			const kickType = s.v14 > 0x16 ? 900 : 7;
 			spawnHitbox(
 				s.fc + dir * 8,
 				s.fe,
@@ -949,8 +954,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				dir,
 				dir * 5,
 				i16(0xfff9),
-				hitType,
-				dmg,
+				kickType,
+				v5a,
 				p,
 			);
 			if (s.v06 === 0) s.v06 = dir * 2;
@@ -1087,6 +1092,20 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			if (s.v20 < s.v1e) s.v20++;
 		}
 
+		// Dash sprite transition (line 14522-14537): velocity check
+		// Dash sprite shows while |v06| > 3 and moving in facing direction.
+		// Defaults to jump sprite (20) when velocity drops.
+		if (s.v12 === 0x2f || s.v12 === 0x30) {
+			s.v12 = 20;
+			const dir = i16(s.v02);
+			if ((s.v06 > 3 && dir === 1) || (s.v06 < -3 && dir === -1)) {
+				s.v12 = 47; // forward dash
+			}
+			if ((s.v06 > 3 && dir === -1) || (s.v06 < -3 && dir === 1)) {
+				s.v12 = 48; // backward dash
+			}
+		}
+
 		// State dispatch (FUN_161d_db4a line 14357-14474)
 		// Decades 3,4,5,6,8 have NO handler for fighters — fall through.
 		// Only specific decades have handlers:
@@ -1116,6 +1135,16 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				// Stun recovery (v14 > 25)
 				s.v14 = 1;
 				s.v12 = 1;
+			}
+		} else if (decade === 11) {
+			// FUN_2b82_4435: INC state each tick — 117, 118, 119 = three dash frames,
+			// then 120 would be decade 12. Port: 3 dash frames then jump (0x14) and
+			// state 1 so FUN_161d_7dd8 + landing behave like a normal air arc (no
+			// lingering 120s / fall-death from a stubbed FUN_2b82_4485).
+			s.v14++;
+			if (s.v14 >= 120) {
+				s.v14 = 1;
+				s.v12 = 0x14; // jump / airborne (same as line 11890-11892)
 			}
 		} else if (decade === 0x28) {
 			// Dead/KO: FUN_2b82_26ba
@@ -1153,7 +1182,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v12 = 1;
 		}
 
-		// Position integration (line 14475-14501) — BEFORE walk animation
+		// Position integration (line 14475-14501)
 		if (s.v06 !== 0) s.fc += s.v06;
 		if (s.v08 !== 0) s.fe += s.v08;
 		if (s.v0a !== 0) s.v00 += s.v0a;
@@ -1202,12 +1231,19 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			}
 		}
 
-		// Landing (line 14514-14528)
+		// Landing (line 14818-14832)
 		if (s.v00 > 0) {
 			s.v0a = 0;
 			s.v00 = 0;
-			s.v12 = 0x15;
-			if (Math.floor(s.v14 / 10) !== 4 && Math.floor(s.v14 / 10) !== 0xc) {
+			if (Math.floor(s.v14 / 50) !== 6) {
+				if (s.v14 < 11) queueSound(0x10, s.fc);
+				s.v12 = 0x15;
+			}
+			if (
+				Math.floor(s.v14 / 10) !== 4 &&
+				Math.floor(s.v14 / 10) !== 0xc &&
+				Math.floor(s.v14 / 50) !== 6
+			) {
 				s.v14 = 0x4b;
 			}
 		}
@@ -1221,14 +1257,56 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.f8 = 0;
 		}
 
-		// Friction (line 14548-14575)
+		// FUN_2b82_2dd9 (fight_decompiled.c ~14542): decade 3 — light hit stun
+		// Runs AFTER life-timer, BEFORE walk handler. Shows hurt frame briefly.
+		if (Math.floor(s.v14 / 10) === 3) {
+			s.v14++;
+			if (s.v14 >= 0x23) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
+		} else if (s.v14 < 0x0b) {
+			// FUN_2b82_2788 (fight_decompiled.c ~14546): walk/idle for fighters
+			// Already handled by walk animation block above
+		}
+
+		// func_0x0002e2f8 (fight_decompiled.c line 14535, impl 11964-12025):
+		// decade 4 — tumble/launched
+		if (Math.floor(s.v14 / 10) === 4) {
+			if (s.v14 > 0x29) {
+				if (s.v12 === 0x12 && s.v16 < 1) s.v12 = 0x25;
+				s.v14++;
+				if (s.v14 === 0x32) {
+					s.v14 = 0x4b;
+					s.v0c = 6;
+					if (s.v16 < 1) {
+						s.f2 = 3;
+					} else {
+						s.v12 = 0x15;
+					}
+				}
+			}
+			if (s.v12 === 0x15 && s.v14 !== 0x4b) {
+				queueSound(10, s.fc);
+				s.v12 = 0x12;
+				s.v14 = (Math.random() < 0.5 ? 0 : 1) * 2 + 0x2a;
+				if (s.v16 < 1) s.v12 = 0x25;
+			}
+			if (s.v14 === 0x29 && s.v12 === 0x10 && s.v0a > 2) {
+				s.v12 = 0x11;
+			}
+		}
+
+		// Friction (file 0x15E4F): trunc(vel / 1.2) per frame.
+		// DS:018B constant = 0x3FF3333333333333 = 1.2 (IEEE 754 double).
+		// Ground-only (v00 == 0), skip landing sprite (v12 != 0x15).
 		if (abs16(s.v06) === 1) s.v06 = 0;
 		else if (s.v00 === 0 && s.v12 !== 0x15 && s.v06 !== 0) {
-			s.v06 = s.v06 > 0 ? s.v06 - 1 : s.v06 + 1;
+			s.v06 = Math.trunc(s.v06 / 1.2);
 		}
 		if (abs16(s.v08) === 1) s.v08 = 0;
 		else if (s.v00 === 0 && s.v12 !== 0x15 && s.v08 !== 0) {
-			s.v08 = s.v08 > 0 ? s.v08 - 1 : s.v08 + 1;
+			s.v08 = Math.trunc(s.v08 / 1.2);
 		}
 
 		// Gravity (line 14576-14580)
@@ -1289,8 +1367,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 
 			// Skip if in death state (line 8534/8538)
 			const decade = Math.floor(s.v14 / 10);
-			if (decade === 4) continue;
+			if (decade === 4 && s.v14 !== 0x29) continue;
 			if (decade === 0x28) continue;
+			if (Math.floor(s.v14 / 20) === 10) continue;
 
 			// Priority check (line 8552-8553)
 			if (s.v24 > slots[hb.owner]?.v24) continue;
@@ -1320,43 +1399,57 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 
 			// ── Handle hit by type ──
 
-			if (hb.type > 0) {
-				// Normal damage hit (line 8713+)
-				const dmg = hb.type % 1000;
-				const _kind = Math.floor(hb.type / 1000);
+			// type=900 is a ghost hitbox (C line 8565): routes to special/no-damage
+			// branch used for hitbox-vs-hitbox interactions only (second kick frame).
+			if (hb.type === 900) continue;
 
-				// Apply damage (line 8714-8767)
+			if (hb.type > 0) {
+				const dmg = hb.type % 1000;
+
+				// Apply damage (line 8714-8730)
 				s.v16 -= dmg;
 				if (s.v16 < 0) s.v16 = 0;
 
-				// Knockback
-				s.v06 = hb.v52 * -4;
-				s.v0a = i16(0xfff6); // -10 upward
-				s.v00 = 0;
+				// Clear victim's input buffer (FUN_25f1_2dd2 ~8857)
+				pushInput(p, "~");
 
-				// Sound effect on hit (line 8818-8826)
-				queueSound(2, s.fc);
+				// Decrement lives counter (line 8858-8860)
+				s.f8 -= hb.v5a % 1000;
 
-				// State transition
-				if (s.v16 <= 0) {
-					// KO: enter death state
-					s.v14 = 40;
-					s.v12 = 1;
-					s.v0a = i16(0xffec); // strong knockup
-					queueSound(8, s.fc);
-				} else if (dmg > 30) {
-					// Heavy hit: fall
-					s.v14 = 1;
-					s.v12 = 3;
-					s.v0a = i16(0xfff6);
-					s.v06 = hb.v52 * -6;
-				} else {
-					// Light hit: stun
-					s.v14 = 20;
-					s.v12 = 1;
+				// Attacker recoil on air-damage hits (line 8861-8863)
+				if (hb.v5a % 1000 === 0x23 && hb.owner < MAX_SLOTS) {
+					slots[hb.owner].v06 = i16(-hb.v54);
 				}
 
-				// Give score/MP to attacker
+				// Heavy vs light determination (line 8865-8868)
+				const isHeavy =
+					hb.v5a % 1000 === 500 ||
+					s.v0a !== 0 ||
+					s.v00 < 0 ||
+					Math.floor(s.v14 / 8) === 4;
+
+				if (isHeavy) {
+					// Heavy / airborne hit → tumble (line 8869-8900)
+					s.f8 = s.fa;
+					if (i16(hb.v52) === i16(s.v02)) {
+						s.v12 = 0x17;
+					} else {
+						s.v12 = 0x10;
+					}
+					s.v06 = i16(hb.v54);
+					s.v0a = i16(hb.v56);
+					s.v14 = 0x29; // 41, decade 4
+					queueSound(3, s.fc);
+				} else {
+					// Light / grounded hit → brief stun (line 8927-8942)
+					queueSound(2, s.fc);
+					s.v14 = 0x1f; // 31, decade 3
+					const prevFrame = s.v12;
+					s.v12 = (Math.random() < 0.5 ? 0 : 1) + 12;
+					if (s.v12 === prevFrame) s.v12 = s.v12 === 12 ? 13 : 12;
+				}
+
+				// Give score/MP to attacker (line 8730-8765)
 				if (hb.owner < MAX_FIGHTERS) {
 					scores[hb.owner] += dmg;
 					slots[hb.owner].v20 = Math.min(
@@ -1365,9 +1458,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 					);
 				}
 
-				// Clear the hitbox after it hits
 				hb.type = 0;
-				break; // one hit per tick per fighter
+				break;
 			}
 		}
 	}
@@ -1436,18 +1528,63 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			}
 		}
 
-		// Phase 3: JUMP key (line 19454-19480) — costs MP (DAT_3463_3420 = v20)
-		// Guards: idle (v14<5), running (decade 9), or grabbed (v12==0x15 but NOT jump prep)
-		if (
-			action === "t" &&
-			(s.v14 < 5 ||
-				Math.floor(s.v14 / 10) === 9 ||
-				(s.v12 === 0x15 && s.v14 !== 0x47 && s.v14 !== 0x48)) &&
-			s.v00 === 0 &&
-			s.v20 > 9
-		) {
-			s.v20 -= 10;
-			s.v14 = 0x47;
+		// Phase 3: JUMP key (line 14830-14856 / 19454-19480)
+		if (action === "t") {
+			// Ground jump: idle, running, or in landing pose — costs 10 MP
+			if (
+				(s.v14 < 5 ||
+					Math.floor(s.v14 / 10) === 9 ||
+					(s.v12 === 0x15 && s.v14 !== 0x47 && s.v14 !== 0x48)) &&
+				s.v00 === 0
+				// && s.v20 > 9 // TODO: restore MP cost after testing
+			) {
+				// s.v20 -= 10; // TODO: restore MP cost after testing
+				s.v14 = 0x47;
+
+				// Landing dash (line 19842-19858): if in landing pose
+				if (s.v12 === 0x15) {
+					// Read held direction since canMove is false during landing
+					if (input.isAsciiDown(KEYS.LEFT[ki])) s.v06 = -5;
+					else if (input.isAsciiDown(KEYS.RIGHT[ki])) s.v06 = 5;
+					if (input.isAsciiDown(KEYS.UP[ki])) s.v08 = -3;
+					else if (input.isAsciiDown(KEYS.DOWN[ki])) s.v08 = 3;
+					if (s.v06 !== 0) {
+						// s.v20 -= 10; // TODO: restore MP cost after testing
+						s.v0a = i16(0xfff5); // -11 upward
+						s.v14 = 1;
+						if (s.v06 > 0 && s.v06 < 10) s.v06 = 9;
+						if (s.v06 < 0 && s.v06 > -10) s.v06 = i16(0xfff7); // -9
+						s.v12 = 0x2f; // dash sprite (47)
+						s.v14 = 0x75; // dash state (117)
+					}
+				}
+			}
+
+			// Air dash (line 19361-19381): press jump while in landing
+			// anticipation pose (v12=0x28), airborne and about to land
+			if (s.v12 === 0x28 && s.v00 < 0 && s.v16 > 0) {
+				s.v12 = 0x30; // dash sprite (48)
+				s.v14 = 0x75; // dash state (117)
+				s.v0a = i16(0xfff5); // -11 upward
+				if (s.v06 < 1) s.v02 = 1;
+				else s.v02 = i16(0xffff);
+				s.v06 = i16(s.v02) * -7;
+				s.v00 = 0;
+				queueSound(0x10, s.fc);
+			}
+
+			// Landing anticipation (line 14862-14879): press jump while
+			// airborne in knockback (decade 4) or hit stun (decade 12),
+			// falling toward ground — enter slow-fall anticipation pose
+			const ad = Math.floor(s.v14 / 10);
+			if ((ad === 0xc || ad === 4) && s.v00 < 0 && s.v16 > 0) {
+				s.v12 = 0x28; // anticipation sprite (40)
+				s.v14 = 0x75; // dash state (117)
+				s.v0a = i16(0xfffe); // -2 slow descent
+				if (s.v06 < 1) s.v02 = 1;
+				else s.v02 = i16(0xffff);
+				s.v06 = i16(s.v02) * -5;
+			}
 		}
 
 		// Phase 4: ATTACK key (line 19516-19526) — random variant 11 or 21
@@ -1912,15 +2049,16 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			);
 		}
 
-		// Debug: P1 mana display
-		const p1mp = slots[0]?.v20 ?? 0;
-		renderer.drawText(
-			`MP: ${p1mp}`,
-			SCREEN_W / 2 - 20,
-			SCREEN_H / 2,
-			"#fff",
-			16,
-		);
+		const p3 = slots[2];
+		if (p3?.f2 === 1) {
+			renderer.drawText(
+				`xvel: ${p3.v06}`,
+				SCREEN_W / 2 - 30,
+				SCREEN_H / 2,
+				"#fff",
+				16,
+			);
+		}
 	}
 
 	// ══════════════════════════════════════════════════════════
