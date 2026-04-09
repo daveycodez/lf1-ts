@@ -2430,21 +2430,6 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				if (s.v12 === 4) continue; // v12=4 means invisible (C line 18495)
 				const weapImg = assets.getImage("WEAPON");
 				const weap = ctx.weapons[s.v18];
-				if (weap && !(globalThis as any).__dbgWeap) {
-					(globalThis as any).__dbgWeap = true;
-					console.log(
-						"ENTITY RENDER: v18=" +
-							s.v18 +
-							" weap=" +
-							weap.name +
-							" pics=" +
-							JSON.stringify(weap.pics) +
-							" v12=" +
-							s.v12 +
-							" totalWeapons=" +
-							ctx.weapons.length,
-					);
-				}
 				if (weapImg && weap) {
 					// Lookup sprite index: v12 maps into weapon fields starting at "pickable"
 					// v12=0→pickable, v12=1→pics[0], v12=2→pics[1], v12=3→pics[2] (C line 18504-18506)
