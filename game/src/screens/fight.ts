@@ -1096,7 +1096,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			// Must be here (not in handleInput) so the cached decade prevents
 			// the run state handler from also firing on the initiation frame.
 			if (checkTripleTapRun(p) && s.v00 === 0) {
-				s.v14 = 0x5b;
+				s.v14 = 91;
+				s.v12 = 45;
+				queueSound(0x10, s.fc);
 			}
 		} else if (decade === 1) {
 			// Attack decade 1: FUN_161d_8779 (line 12129)
@@ -1126,11 +1128,12 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				else s.v02 = 1;
 			}
 			s.v06 = i16(s.v02) * 8;
+			// Original C cycle: 45, 46, 45, 44 — sound on sprite 45
 			s.v14++;
-			if (s.v14 >= 0x5f) s.v14 = 0x5b;
-			s.v12 = s.v14 - 0x2f;
-			if (s.v12 === 0x2f) s.v12 = 0x2d;
-			if (s.v12 === 0x2d) queueSound(0x10, s.fc);
+			if (s.v14 >= 95) s.v14 = 91;
+			const RUN_SPRITES = [45, 46, 45, 44];
+			s.v12 = RUN_SPRITES[s.v14 - 91];
+			if (s.v12 === 45) queueSound(0x10, s.fc);
 			const run2 = checkTripleTapRun(p);
 			if (!run2 || s.v00 !== 0) {
 				s.v14 = 1;
