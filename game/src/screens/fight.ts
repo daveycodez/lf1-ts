@@ -50,9 +50,12 @@ const ACT_SPR = 25; // actual sprite size (0x19)
 const ACT_COLS = 12; // 0xc columns per sheet
 const ACT1_MAX = 60; // 12 cols * 5 rows = 60 frames per sheet (0-59 ACT1, 60+ ACT2)
 
-const WEAP_FW = 18;
-const WEAP_FH = 16;
-const WEAP_COLS = 15;
+const WEAP_FW = 18; // cell pitch X (C: 0x12)
+const WEAP_FH = 14; // cell pitch Y (C: 0x0e)
+const WEAP_COLS = 15; // columns per row (C: 0x0f)
+const WEAP_SPR_W = 17; // sprite width (C: 0x11)
+const WEAP_SPR_H = 13; // sprite height (C: 0x0d)
+const WEAP_PAD = 1; // padding in each cell
 
 const HEAD_FW = 18;
 const HEAD_FH = 13;
@@ -497,6 +500,85 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			return true;
 		}
 		return false;
+	}
+
+	// ══════════════════════════════════════════════════════════
+	// FUN_161d_2298-2644: Super move input pattern matching
+	// Motions from data-changing.txt, relative to facing direction:
+	//   A: back fwd fwd attack     B: fwd down up attack
+	//   C: fwd back fwd attack     D: fwd fwd attack (airborne)
+	//   E: up down back fwd attack H: fwd back fwd attack (v14/50==5 guard)
+	// ══════════════════════════════════════════════════════════
+	function checkMotion(p: number, motionType: string): boolean {
+		const buf = inputBuf[p];
+		const s = slots[p];
+		const fwd = i16(s.v02) === 1 ? "d" : "a";
+		const back = i16(s.v02) === 1 ? "a" : "d";
+
+		switch (motionType) {
+			case "A":
+				if (s.v00 !== 0) return false;
+				return (
+					buf[4] === "s" && buf[3] === fwd && buf[2] === fwd && buf[1] === back
+				);
+			case "B":
+				if (s.v00 !== 0) return false;
+				return (
+					buf[4] === "s" && buf[3] === "w" && buf[2] === "x" && buf[1] === fwd
+				);
+			case "C":
+				if (s.v00 !== 0) return false;
+				return (
+					buf[4] === "s" && buf[3] === fwd && buf[2] === back && buf[1] === fwd
+				);
+			case "D":
+				if (!(s.v00 < -0x14)) return false;
+				return buf[4] === "s" && buf[3] === fwd && buf[2] === fwd;
+			case "E":
+				if (s.v00 !== 0) return false;
+				return (
+					buf[4] === "s" &&
+					buf[3] === fwd &&
+					buf[2] === back &&
+					buf[1] === "x" &&
+					buf[0] === "w"
+				);
+			case "H":
+				if (Math.floor(s.v14 / 50) !== 5) return false;
+				return (
+					buf[4] === "s" && buf[3] === fwd && buf[2] === back && buf[1] === fwd
+				);
+			default:
+				return false;
+		}
+	}
+
+	// FUN_161d_2767: Check all 3 special moves for the current character
+	function checkSuperInput(p: number): boolean {
+		const s = slots[p];
+		const charDef = ctx.characters[s.v18];
+		if (!charDef?.specials) return false;
+
+		for (let row = 0; row < charDef.specials.length && row < 3; row++) {
+			const sp = charDef.specials[row];
+			if (s.v20 < sp.mpCost) continue;
+			if (checkMotion(p, sp.type)) {
+				activateSuper(p, row);
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// FUN_161d_1788: Activate a super move
+	function activateSuper(p: number, moveRow: number): void {
+		const s = slots[p];
+		const charDef = ctx.characters[s.v18];
+		const sp = charDef.specials[moveRow];
+		s.v14 = sp.projectileType * 100 + 1000;
+		s.v1c = moveRow;
+		pushInput(p, "~");
+		s.v20 -= sp.mpCost;
 	}
 
 	// ── Game state arrays (matching DAT_3463 data segment) ──
@@ -1027,49 +1109,407 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	// ══════════════════════════════════════════════════════════
 	function handleAirborne(p: number) {
 		const s = slots[p];
-		const defaultLifetime = 500;
+		const weap = ctx.weapons[s.v18];
+		const breakType = weap?.breakType ?? 1;
+		const weapClass = weap?.weaponClass ?? 1;
+		const weapDmg = weap?.damage ?? 10;
+		const weapPickable = weap?.pickable ?? 1;
+		const facing = i16(s.v02);
 
-		// Special type 0xf: decrement timer, clear when done (line 9603-9610)
+		// Special type 0xf (Deep---): decrement timer, clear when done (line 9603-9610)
 		if (s.v18 === 0xf) {
 			s.v0e--;
 			if (s.v0e <= 0) s.f2 = 0;
 			return;
 		}
 
-		// Projectile steering toward target (line 9612-9727)
-		if (s.v04 >= 0 && s.v04 < MAX_SLOTS && slots[s.v04].f2 !== 0) {
-			const target = slots[s.v04];
-			if (target.fc < s.fc) s.v06 = -12;
-			else if (target.fc > s.fc) s.v06 = 12;
-			if (target.fe < s.fe) s.v08 = -2;
-			else if (target.fe > s.fe) s.v08 = 2;
-			s.v02 = s.v06 >= 0 ? 1 : i16(0xffff);
+		// Branch on throwType for homing vs straight-line (line 9612-9741)
+		const isHoming =
+			breakType === 4 || ((s.v18 === 0x13 || s.v18 === 0x1a) && s.v0e > 0);
+
+		if (isHoming) {
+			// Homing projectiles: timer tick, target search, gradual acceleration
+			if (s.v18 === 0x13 || s.v18 === 0x1a) s.v0e--;
+
+			// Validate current target
+			if (
+				i16(s.v04) !== -1 &&
+				(s.v04 >= MAX_FIGHTERS || slots[s.v04].f2 !== 1)
+			) {
+				s.v04 = i16(0xffff);
+			}
+
+			// Find new target if needed (line 9626-9685)
+			if (i16(s.v04) === -1 || s.v04 === s.v10) {
+				s.v04 = s.v10;
+				s.v06 = facing * 0x11;
+				let bestDist = 0x7fff;
+				for (let i = 0; i < MAX_FIGHTERS; i++) {
+					if (slots[i].f2 !== 1) continue;
+					if (i === s.v10) continue;
+					if (hud[i]?.v3c === hud[s.v10]?.v3c) continue;
+					if (Math.floor(slots[i].v14 / 10) === 0x28) continue;
+					const dx = abs16(slots[i].fc - s.fc);
+					const dy = abs16(slots[i].fe - s.fe);
+					if (dx + dy < bestDist) {
+						bestDist = dx + dy;
+						s.v04 = i;
+					}
+				}
+			}
+
+			// Gradual acceleration toward target (line 9687-9726)
+			if (s.v04 >= 0 && s.v04 < MAX_FIGHTERS && slots[s.v04].f2 === 1) {
+				const t = slots[s.v04];
+				if (t.fc < s.fc) {
+					s.v06 = i16(s.v06 - 2);
+					if (s.v06 < -0x11) s.v06 = i16(0xffef);
+				} else {
+					s.v06 = i16(s.v06 + 2);
+					if (s.v06 > 0x11) s.v06 = 0x11;
+				}
+				if (t.fe < s.fe) {
+					s.v08 = i16(s.v08 - 1);
+					if (s.v08 < -3) s.v08 = i16(0xfffd);
+				} else {
+					s.v08 = i16(s.v08 + 1);
+					if (s.v08 > 3) s.v08 = 3;
+				}
+				s.v02 = s.v06 < 0 ? i16(0xffff) : 1;
+			}
+			if (i16(s.v04) === -1) s.v04 = s.v10;
 		} else {
-			s.v06 = i16(s.v02) * 12;
+			// Straight-line projectiles (line 9728-9741)
+			const speed =
+				(weapClass === 2 || weapClass === 6) && s.v18 !== 0x10 && s.v18 !== 0x1a
+					? 12
+					: 0x11;
+			s.v06 = facing * speed;
 		}
 
-		// Set vertical acceleration (line 9742)
+		// Elevated position (line 9742)
 		s.v00 = i16(0xfff9); // -7
 
-		// Toggle animation frame (line 9743-9747)
-		s.v12 = 3 - s.v12;
-		if (s.v12 < 1) s.v12 = 1;
-		if (s.v12 > 2) s.v12 = 2;
+		// Toggle animation frame only if breakType != 1 (line 9743-9747)
+		// C checks 0x2f1c (breakType), NOT throwType
+		if (breakType !== 1) {
+			s.v12 = 3 - s.v12;
+			if (s.v12 === 0) s.v12 = 1;
+		}
 
-		// Spawn projectile hitbox
+		// Hitbox v5a calculation (line 9749-9764)
+		let hbV5a = 500;
+		let hbV5aBonus = 0;
+		if (weapPickable === 0) hbV5a = 0x45;
+		if (s.v18 === 3) hbV5a = 0x19;
+		if (s.v18 === 0xf) hbV5a = 0x23;
+		if (weapClass === 1 || s.v18 === 0xf || s.v18 === 0x13) hbV5aBonus = 1000;
+		if (s.v18 === 0x10) hbV5aBonus = 2000;
+
+		// Spawn projectile hitbox (line 9766-9774)
 		spawnHitbox(
-			s.fc,
+			s.fc + facing * 0xd,
 			s.fe,
 			s.v00,
-			8,
-			8,
-			i16(s.v02),
-			s.v06,
+			5,
+			5,
+			facing,
+			facing * 5,
 			i16(0xfff9),
-			1000 + 30,
-			defaultLifetime,
+			weapDmg + weapClass * 1000,
+			hbV5a + hbV5aBonus,
 			p,
 		);
+	}
+
+	// ══════════════════════════════════════════════════════════
+	// Super move state handlers (v14 >= 1000, dispatched by v14/100)
+	// ══════════════════════════════════════════════════════════
+
+	function getSpecialFrames(p: number): [number, number, number, number] {
+		const s = slots[p];
+		const charDef = ctx.characters[s.v18];
+		if (!charDef?.specials?.[s.v1c]) return [1, 1, 0, 0];
+		return charDef.specials[s.v1c].frames;
+	}
+
+	function handleSuperState(p: number): void {
+		const s = slots[p];
+		const stateId = Math.floor(s.v14 / 100);
+		switch (stateId) {
+			case 11:
+				handleSuper_Ball(p);
+				break;
+			case 12:
+				handleSuper_Combo(p);
+				break;
+			case 13:
+				handleSuper_Rush(p);
+				break;
+			case 14:
+				handleSuper_Teleport(p);
+				break;
+			case 25:
+				handleSuper_Catch(p);
+				break;
+			default:
+				s.v14 = 1;
+				s.v12 = 1;
+				break;
+		}
+	}
+
+	// FUN_161d_9e9e: Ball projectile super (v14/100 = 0xB = 11)
+	// Used by Davis A, Dennis A, Firen A, Freeze A, John A, Woody B, Julian B, Rudolf A
+	// NOTE: FUN_25f1_02e5 called in the C is the HUD portrait renderer, NOT a sound fn.
+	function handleSuper_Ball(p: number): void {
+		const s = slots[p];
+		const frames = getSpecialFrames(p);
+		const dir = i16(s.v02);
+		const base = s.v14 - (s.v14 % 100);
+
+		s.v14++;
+
+		// C: v18==10||v18==0xb branch handles characters 10/11 with multi-ball spawn.
+		// All other characters (including Davis, v18=0) use the else branch (line 12841).
+		const charType = s.v18;
+
+		if (charType === 10 || charType === 0xb) {
+			// Multi-ball characters (handled separately in C line 12764-12839)
+			s.v0a = 0;
+			s.v08 = 0;
+			s.v06 = 0;
+			s.v12 = frames[0];
+			if (
+				s.v14 === base + 3 ||
+				s.v14 === base + 5 ||
+				s.v14 === base + 7 ||
+				s.v14 === base + 9 ||
+				s.v14 === base + 11
+			) {
+				if (s.v14 > base + 3) {
+					if (s.v20 < 0x19) {
+						if (charType !== 0xb) {
+							s.v14 = base + 12;
+							return;
+						}
+					} else {
+						s.v20 -= 0x19;
+					}
+				}
+				s.v12 = frames[1];
+				const slot = findFreeSlot();
+				if (slot >= 0) {
+					const e = slots[slot];
+					e.f2 = 2;
+					e.v18 = frames[2];
+					e.v0e = 0xf;
+					e.fe = s.fe + 1;
+					e.f8 = 1;
+					e.v04 = 8;
+					e.v10 = p;
+					e.v02 = s.v02;
+					e.v14 = 0x1e;
+					e.fc = s.fc + dir * 4;
+					e.v08 = Math.floor(Math.random() * 7) - 3;
+					e.v00 = i16(s.v00 - 8);
+					e.v12 = Math.floor(Math.random() * 2) + 1;
+				}
+			}
+			if ((s.v14 === base + 12 && charType === 10) || s.v14 === base + 15) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
+		} else {
+			// Single-ball characters (Davis etc.) — C line 12841-12890
+			s.v0a = 0;
+			s.v08 = 0;
+			s.v06 = 0;
+
+			// C line 12845: v14 == base+1 → portrait flash + character voice (FUN_25f1_02e5)
+			if (s.v14 === base + 1) {
+				audio.play("C2", 1.0);
+			}
+			// C line 12848: base < v14 < base+2 → frame 0 (wind-up)
+			if (s.v14 > base && s.v14 < base + 2) {
+				s.v12 = frames[0];
+			}
+			// C line 12855: v14 > base+1 → frame 1 (throw pose)
+			if (s.v14 > base + 1) {
+				s.v12 = frames[1];
+			}
+			// C line 12861: v14 == base+2 → spawn entity
+			if (s.v14 === base + 2) {
+				const slot = findFreeSlot();
+				if (slot >= 0) {
+					const e = slots[slot];
+					e.f2 = 2;
+					e.v18 = frames[2];
+					e.fe = s.fe + 1;
+					e.f8 = 1;
+					e.v04 = 8;
+					e.v10 = p;
+					e.v0e = 0x1e;
+					e.v02 = s.v02;
+					e.v14 = 0x1e;
+					e.fc = s.fc + dir * 7;
+					e.v00 = i16(0xfff8);
+					e.v12 = Math.floor(Math.random() * 2) + 1;
+				}
+			}
+			// C line 12885: v14 > base+3, or v14==base+3 && charType==4 → reset
+			if (s.v14 > base + 3 || (s.v14 === base + 3 && charType === 4)) {
+				s.v14 = 1;
+				s.v12 = 1;
+			}
+		}
+	}
+
+	// FUN_161d_a595: Multi-hit combo phase 1 (v14/100 = 0xC = 12)
+	// Used by Davis B (SingLong). Launches up with hitboxes.
+	function handleSuper_Combo(p: number): void {
+		const s = slots[p];
+		const frames = getSpecialFrames(p);
+		const dir = i16(s.v02);
+		const base = s.v14 - (s.v14 % 100);
+
+		s.v14++;
+
+		if (s.v14 === base + 2) {
+			s.v06 = dir * 7;
+			s.v08 = 0;
+			s.v0a = i16(0xfff5);
+			s.v12 = frames[0];
+		}
+		if (s.v14 === base + 5) {
+			s.v12 = frames[1];
+		}
+		if (s.v14 === base + 7) {
+			s.v12 = frames[2];
+		}
+		if (s.v14 < base + 9) {
+			spawnHitbox(
+				s.fc,
+				s.fe,
+				s.v00 - 12,
+				12,
+				17,
+				dir,
+				dir * 5,
+				i16(0xfff2),
+				35,
+				500,
+				p,
+			);
+			s.v24 = 100;
+		}
+		if (s.v14 === base + 9) {
+			s.v12 = frames[3];
+		}
+	}
+
+	// FUN_161d_a7c0: Rush phase 2 (v14/100 = 0xD = 13)
+	// Continuation of combo or standalone rush with hitboxes.
+	function handleSuper_Rush(p: number): void {
+		const s = slots[p];
+		const frames = getSpecialFrames(p);
+		const dir = i16(s.v02);
+		const base = s.v14 - (s.v14 % 100);
+
+		s.v14++;
+
+		if (s.v14 === base + 6) {
+			s.v06 = dir * 13;
+			s.v08 = 0;
+			s.v0a = 0;
+			s.v12 = frames[0];
+		}
+		if (s.v14 >= base + 10) {
+			s.v14 = 1;
+			s.v12 = 1;
+		} else {
+			spawnHitbox(
+				s.fc + dir * 8,
+				s.fe,
+				s.v00 - 12,
+				8,
+				17,
+				dir,
+				dir * 5,
+				i16(0xfff9),
+				25,
+				500,
+				p,
+			);
+			s.v24 = 50;
+		}
+	}
+
+	// FUN_161d_a931: Teleport/special (v14/100 = 0xE = 14)
+	// Used by some characters. Simple animation + return.
+	function handleSuper_Teleport(p: number): void {
+		const s = slots[p];
+		const frames = getSpecialFrames(p);
+		const base = s.v14 - (s.v14 % 100);
+
+		s.v14++;
+		s.v0a = 0;
+		s.v08 = 0;
+		s.v06 = 0;
+		s.v24 = 101;
+
+		if (s.v14 <= base + 2) {
+			s.v12 = frames[0];
+		} else {
+			s.v12 = frames[1];
+		}
+		if (s.v14 >= base + 5) {
+			s.v14 = 1;
+			s.v12 = 1;
+			s.v24 = 0;
+		}
+	}
+
+	// FUN_161d_c73e: Catch/rush super (v14/100 = 0x19 = 25)
+	// Used by Davis C (JokeYen). Rushes forward with hitboxes.
+	function handleSuper_Catch(p: number): void {
+		const s = slots[p];
+		const frames = getSpecialFrames(p);
+		const dir = i16(s.v02);
+		const base = s.v14 - (s.v14 % 100);
+
+		s.v14++;
+		s.v24 = 1;
+		s.v06 = dir * 12;
+		s.v0a = 0;
+		s.v08 = 0;
+
+		if (s.v14 % 2 === 0) {
+			queueSound(0x10, s.fc);
+			s.v12 = frames[0];
+		} else {
+			s.v12 = frames[1];
+		}
+
+		spawnHitbox(
+			s.fc + dir * 8,
+			s.fe,
+			s.v00 - 12,
+			5,
+			23,
+			dir,
+			dir * 5,
+			i16(0xfff9),
+			7,
+			500,
+			p,
+		);
+
+		if (s.v14 > base + 3) {
+			s.v14 = 1;
+			s.v12 = 1;
+			s.v24 = 0;
+		}
 	}
 
 	// ══════════════════════════════════════════════════════════
@@ -1106,58 +1546,59 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			}
 		}
 
-		// State dispatch (FUN_161d_db4a line 14357-14474)
-		// Decades 3,4,5,6,8 have NO handler for fighters — fall through.
-		// Only specific decades have handlers:
+		// Super move input check (FUN_161d_2767, line 14306-14328)
+		// Check in interruptible states: idle(0), punch(1), kick(2), run(9), dash area
 		const decade = Math.floor(s.v14 / 10);
-		if (decade === 0) {
-			// Run initiation (line 14359-14364): FUN_25f1_2e1b in the iVar3==0 block.
-			// Must be here (not in handleInput) so the cached decade prevents
-			// the run state handler from also firing on the initiation frame.
+		if (
+			(decade === 0 ||
+				decade === 1 ||
+				decade === 2 ||
+				decade === 9 ||
+				Math.floor(s.v14 / 20) === 9 ||
+				decade === 0xd ||
+				Math.floor(s.v14 / 50) === 5) &&
+			s.v04 < 5
+		) {
+			checkSuperInput(p);
+		}
+
+		// State dispatch (FUN_161d_db4a line 14357-14474)
+		const stateDiv100 = Math.floor(s.v14 / 100);
+		if (stateDiv100 >= 10) {
+			handleSuperState(p);
+		} else if (decade === 0) {
 			if (checkTripleTapRun(p) && s.v00 === 0) {
 				s.v14 = 91;
 				s.v12 = 45;
 				queueSound(0x10, s.fc);
 			}
 		} else if (decade === 1) {
-			// Attack decade 1: FUN_161d_8779 (line 12129)
 			handleFighterAttack(p);
 		} else if (decade === 2) {
-			// Decade 2 is shared: attack continuation (v14=21-25) vs hit stun (v14=20)
 			if (s.v14 === 20) {
-				// Hit stun (from collision, line 10059): show recoil frames
 				s.v12 = 5;
 				s.v14++;
 			} else if (s.v14 <= 0x19) {
-				// Attack continuation (v14=21-25): same handler as decade 1
 				handleFighterAttack(p);
 			} else {
-				// Stun recovery (v14 > 25)
 				s.v14 = 1;
 				s.v12 = 1;
 			}
 		} else if (decade === 11) {
-			// FUN_2b82_4435: INC state each tick — 117, 118, 119 = three dash frames,
-			// then 120 would be decade 12. Port: 3 dash frames then jump (0x14) and
-			// state 1 so FUN_161d_7dd8 + landing behave like a normal air arc (no
-			// lingering 120s / fall-death from a stubbed FUN_2b82_4485).
 			s.v14++;
 			if (s.v14 >= 120) {
 				s.v14 = 1;
-				s.v12 = 0x14; // jump / airborne (same as line 11890-11892)
+				s.v12 = 0x14;
 			}
 		} else if (decade === 0x28) {
 			// Dead/KO: FUN_2b82_26ba
 		} else if (decade === 9) {
-			// Run state (FUN_161d_7bdd, line 11770)
-			// Original calls FUN_25f1_2e1b TWICE: line 11778 and line 11802
 			const run1 = checkTripleTapRun(p);
 			if (run1) {
 				if (inputBuf[p][4] === "a") s.v02 = i16(0xffff);
 				else s.v02 = 1;
 			}
 			s.v06 = i16(s.v02) * 8;
-			// Original C cycle: 45, 46, 45, 44 — sound on sprite 45
 			s.v14++;
 			if (s.v14 >= 95) s.v14 = 91;
 			const RUN_SPRITES = [45, 46, 45, 44];
@@ -1389,9 +1830,22 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			const vTest = abs16(s.v00 - 10 - hb.y);
 			if (vTest >= hb.hh + 11) continue;
 
-			// Team check: skip friendly fire for human fighters (line 8563-8585)
+			// Team check: skip friendly fire (line 8563-8585)
 			if (hb.owner < MAX_FIGHTERS && p < MAX_FIGHTERS) {
+				// Fighter-vs-fighter same team skip
 				if (hud[p]?.v3c === hud[hb.owner]?.v3c && hb.type > 0) continue;
+			}
+			// Entity owner-chain: if hitbox from f2=2 entity, check entity's
+			// real owner (v10) team vs target team (C line 8574-8577)
+			if (hb.owner >= MAX_FIGHTERS && hb.owner < MAX_SLOTS) {
+				const ownerSlot = slots[hb.owner];
+				if (
+					ownerSlot.f2 === 2 &&
+					ownerSlot.v10 < MAX_FIGHTERS &&
+					p < MAX_FIGHTERS
+				) {
+					if (hud[p]?.v3c === hud[ownerSlot.v10]?.v3c) continue;
+				}
 			}
 
 			// Invulnerability check
@@ -1419,6 +1873,47 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				// Attacker recoil on air-damage hits (line 8861-8863)
 				if (hb.v5a % 1000 === 0x23 && hb.owner < MAX_SLOTS) {
 					slots[hb.owner].v06 = i16(-hb.v54);
+				}
+
+				// Entity-to-explosion on projectile hit (C line 8804-8856)
+				const hitType = Math.floor(hb.type / 1000);
+				if (hb.owner < MAX_SLOTS && slots[hb.owner]?.f2 === 2) {
+					const entity = slots[hb.owner];
+					if (
+						hitType === 2 ||
+						hitType === 3 ||
+						(hitType === 6 && entity.f2 === 2)
+					) {
+						if (entity.v18 < 0x16 || entity.v18 > 0x19) {
+							const eWeap = ctx.weapons[entity.v18];
+							if (eWeap) entity.v18 = eWeap.pics[2];
+							queueSound(entity.v18 === 0x18 ? 3 : 7, entity.fc);
+						}
+						if (hitType === 6) {
+							entity.v18 = 0x17;
+							queueSound(4, s.fc);
+						}
+						entity.v14 = 0x28;
+						entity.v12 = 1;
+						entity.v06 = 0;
+						entity.v08 = 0;
+						entity.v0a = 0;
+					} else if (hitType < 2) {
+						// Light entity hit → entity bounces (C line 8833-8856)
+						const eWeapClass = ctx.weapons[entity.v18]?.weaponClass ?? 0;
+						if (eWeapClass !== 4 && entity.f8 < 500) {
+							queueSound(2, s.fc);
+							entity.v14 = 1;
+							entity.v12 = 3;
+							if (ctx.weapons[entity.v18]?.throwType === 3) {
+								entity.v0a = i16(0xfffd);
+								entity.v06 = Math.floor(i16(entity.v06) / 2);
+							} else {
+								entity.v06 = Math.floor(Math.random() * 7) - 3;
+								entity.v0a = i16(0xfff9);
+							}
+						}
+					}
 				}
 
 				// Heavy vs light determination (line 8865-8868)
@@ -1450,12 +1945,25 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				}
 
 				// Give score/MP to attacker (line 8730-8765)
+				// For fighter hitboxes: direct attacker
 				if (hb.owner < MAX_FIGHTERS) {
 					scores[hb.owner] += dmg;
 					slots[hb.owner].v20 = Math.min(
 						slots[hb.owner].v1e,
 						slots[hb.owner].v20 + Math.floor(dmg / 3),
 					);
+				}
+				// For entity hitboxes: credit entity's real owner (C line 8749-8767)
+				if (hb.owner >= MAX_FIGHTERS && hb.owner < MAX_SLOTS) {
+					const ent = slots[hb.owner];
+					if (ent.f2 === 2 && ent.v10 < MAX_FIGHTERS && ent.v18 !== 0xf) {
+						const realOwner = ent.v10;
+						scores[realOwner] += dmg;
+						slots[realOwner].v20 = Math.min(
+							slots[realOwner].v1e,
+							slots[realOwner].v20 + Math.floor(dmg / 3),
+						);
+					}
 				}
 
 				hb.type = 0;
@@ -1917,58 +2425,98 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				continue; // no head overlay for dead fighters
 			}
 
-			// ── Body sprite (line 18360-18382) ──
-			let frame = s.v12 - 1;
-			if (frame < 0) frame = 0;
-
-			const actImg = frame < ACT1_MAX ? actImg1 : actImg2;
-			const localFrame = frame < ACT1_MAX ? frame : frame - ACT1_MAX;
-
-			if (actImg) {
-				const sx = (localFrame % ACT_COLS) * ACT_CELL + ACT_PAD;
-				const sy = Math.floor(localFrame / ACT_COLS) * ACT_CELL + ACT_PAD;
-				const drawX = s.fc - scrollX - 12;
-				const drawY = s.fe + s.v00 - 0x18;
-
-				if (idx < MAX_FIGHTERS) {
-					drawRecoloredSprite(actImg, sx, sy, drawX, drawY, flip, s.v18);
-				} else {
+			// ── Entity sprite from WEAPON.png (FUN_25f1_2795, line 18486) ──
+			if (s.f2 === 2 && idx >= MAX_FIGHTERS) {
+				if (s.v12 === 4) continue; // v12=4 means invisible (C line 18495)
+				const weapImg = assets.getImage("WEAPON");
+				const weap = ctx.weapons[s.v18];
+				if (weap && !(globalThis as any).__dbgWeap) {
+					(globalThis as any).__dbgWeap = true;
+					console.log(
+						"ENTITY RENDER: v18=" +
+							s.v18 +
+							" weap=" +
+							weap.name +
+							" pics=" +
+							JSON.stringify(weap.pics) +
+							" v12=" +
+							s.v12 +
+							" totalWeapons=" +
+							ctx.weapons.length,
+					);
+				}
+				if (weapImg && weap) {
+					// Lookup sprite index: v12 maps into weapon fields starting at "pickable"
+					// v12=0→pickable, v12=1→pics[0], v12=2→pics[1], v12=3→pics[2] (C line 18504-18506)
+					let picVal: number;
+					if (s.v12 >= 1 && s.v12 <= 3) picVal = weap.pics[s.v12 - 1];
+					else picVal = weap.pickable;
+					let sprIdx = picVal - 1;
+					// Special case: v18=4 (Milk) and v16=1 → offset by 58 (C line 18507-18509)
+					if (s.v18 === 4 && s.v16 === 1) sprIdx = picVal + 0x3a;
+					const wsx = (sprIdx % WEAP_COLS) * WEAP_FW + WEAP_PAD;
+					const wsy = Math.floor(sprIdx / WEAP_COLS) * WEAP_FH + WEAP_PAD;
+					const drawX = s.fc - scrollX - 8; // C: fc - 8
+					const drawY = s.fe + s.v00 - 0xc; // C: fe + v00 - 12
 					renderer.drawSprite(
-						actImg,
-						sx,
-						sy,
-						ACT_SPR,
-						ACT_SPR,
+						weapImg,
+						wsx,
+						wsy,
+						WEAP_SPR_W,
+						WEAP_SPR_H,
 						drawX,
 						drawY,
 						flip,
 					);
 				}
+			} else {
+				// ── Fighter body sprite from ACT sheets (line 18360-18382) ──
+				let frame = s.v12 - 1;
+				if (frame < 0) frame = 0;
 
-				// ── HEAD overlay (line 18412-18428) ──
-				// Condition: v12 < 61 AND DAT_4b0d[v12] < 50
-				// Position uses per-frame offset tables
-				const fi = s.v12;
-				// HEAD overlay (line 18412-18428)
-				// Condition: v12 < 0x3d AND (byte)DAT_4b0d[v12] < 0x32
-				// Source: from HEAD.GRH using f4 (skin variant), NOT charIdx
-				// Position: fc + v02*-4 + DAT_4b4a[v12]*v02 - 8, fe + DAT_4b0d[v12] + v00 - 0x18
-				if (
-					idx < MAX_FIGHTERS &&
-					fi > 0 &&
-					fi < 61 &&
-					HEAD_OFFSET_Y[fi] < 0x32
-				) {
-					const hImg = assets.getImage("HEAD");
-					if (hImg) {
-						const f4 = s.f4;
-						const hsx = ((f4 - 1) % 11) * 18 + 1;
-						const hsy = Math.floor((f4 - 1) / 11) * 13 + 1;
-						const facing = i16(s.v02);
-						const headX =
-							s.fc + facing * -4 + HEAD_OFFSET_X[fi] * facing - 8 - scrollX;
-						const headY = s.fe + HEAD_OFFSET_Y[fi] + s.v00 - 0x18;
-						renderer.drawSprite(hImg, hsx, hsy, 17, 12, headX, headY, flip);
+				const actImg = frame < ACT1_MAX ? actImg1 : actImg2;
+				const localFrame = frame < ACT1_MAX ? frame : frame - ACT1_MAX;
+
+				if (actImg) {
+					const sx = (localFrame % ACT_COLS) * ACT_CELL + ACT_PAD;
+					const sy = Math.floor(localFrame / ACT_COLS) * ACT_CELL + ACT_PAD;
+					const drawX = s.fc - scrollX - 12;
+					const drawY = s.fe + s.v00 - 0x18;
+
+					if (idx < MAX_FIGHTERS) {
+						drawRecoloredSprite(actImg, sx, sy, drawX, drawY, flip, s.v18);
+					} else {
+						renderer.drawSprite(
+							actImg,
+							sx,
+							sy,
+							ACT_SPR,
+							ACT_SPR,
+							drawX,
+							drawY,
+							flip,
+						);
+					}
+
+					// ── HEAD overlay (line 18412-18428) ──
+					const fi = s.v12;
+					if (
+						idx < MAX_FIGHTERS &&
+						fi > 0 &&
+						fi < 61 &&
+						HEAD_OFFSET_Y[fi] < 0x32
+					) {
+						const hImg = assets.getImage("HEAD");
+						if (hImg) {
+							const f4 = s.f4;
+							const hsx = ((f4 - 1) % 11) * 18 + 1;
+							const hsy = Math.floor((f4 - 1) / 11) * 13 + 1;
+							const facing = i16(s.v02);
+							const headX =
+								s.fc + facing * -4 + HEAD_OFFSET_X[fi] * facing - 8 - scrollX;
+							const headY = s.fe + HEAD_OFFSET_Y[fi] + s.v00 - 0x18;
+							renderer.drawSprite(hImg, hsx, hsy, 17, 12, headX, headY, flip);
+						}
 					}
 				}
 			}

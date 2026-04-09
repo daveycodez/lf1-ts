@@ -83,34 +83,46 @@ export function parseDataDat(text: string): {
 			continue;
 		}
 
-		// Weapon definitions
-		const weapMatch = line.match(
-			/^\s*(\w[\w\-+]*)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)/,
-		);
-		if (weapMatch && line.includes("  ") && specials.length > 0) {
-			weapons.push({
-				id: weapons.length,
-				name: weapMatch[1],
-				holdType: parseInt(weapMatch[2]),
-				throwType: parseInt(weapMatch[3]),
-				breakType: parseInt(weapMatch[4]),
-				weaponClass: parseInt(weapMatch[5]),
-				damage: parseInt(weapMatch[6]),
-				pickable: parseInt(weapMatch[7]),
-				pics: [
-					parseInt(weapMatch[8]),
-					parseInt(weapMatch[9]),
-					parseInt(weapMatch[10]),
-				],
-				elasticity: parseInt(weapMatch[11]),
-			});
+		// Weapon section: find "Weapon:" header, parse lines until "E"
+		if (line.startsWith("Weapon:") || line.includes("Weapon:--")) {
 			i++;
+			while (i < lines.length) {
+				const wline = lines[i].trim();
+				if (wline === "E") {
+					i++;
+					break;
+				}
+				const parts = wline.split(/\s+/);
+				if (parts.length >= 11) {
+					weapons.push({
+						id: weapons.length,
+						name: parts[0],
+						holdType: parseInt(parts[1]),
+						throwType: parseInt(parts[2]),
+						breakType: parseInt(parts[3]),
+						weaponClass: parseInt(parts[4]),
+						damage: parseInt(parts[5]),
+						pickable: parseInt(parts[6]),
+						pics: [parseInt(parts[7]), parseInt(parts[8]), parseInt(parts[9])],
+						elasticity: parseInt(parts[10]),
+					});
+				}
+				i++;
+			}
 			continue;
 		}
 
 		i++;
 	}
 
+	console.log(
+		"PARSER: weapons count=" +
+			weapons.length +
+			" [12]=" +
+			weapons[12]?.name +
+			" [22]=" +
+			weapons[22]?.name,
+	);
 	return { characters, weapons, specials, backgrounds, aiTable };
 }
 
