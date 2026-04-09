@@ -85,9 +85,7 @@ export class Input {
 			e.preventDefault();
 			const ascii = KEY_TO_ASCII[e.key];
 			if (ascii !== undefined) {
-				if (!this.asciiDown.has(ascii)) {
-					this.pressQueue.push(ascii);
-				}
+				this.pressQueue.push(ascii);
 				this.asciiDown.add(ascii);
 			}
 		});

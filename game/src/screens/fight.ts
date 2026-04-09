@@ -484,7 +484,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 
 	// Triple-tap run detection (FUN_25f1_2e1b, line 18897)
 	// Returns true if last 3 input buffer entries are 'aaa' or 'ddd'.
-	// Running costs 1 HP per tick for human players.
+	// Drains 1 MP per call for human players (v04 < 5). Requires MP > 1.
 	function checkTripleTapRun(p: number): boolean {
 		const buf = inputBuf[p];
 		const s = slots[p];
@@ -523,7 +523,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 	let scrollX = 0; // DAT_3463_46e1
 	let exitFlag = 0; // DAT_3463_2ef6
 	let tickCount = 0; // DAT_3463_49b6
-	let tickParity = 0; // DAT_3463_46db — toggles 0/1 each tick, gates healing/idle
+	let tickParity = 0; // DAT_3463_46db — toggles 0/1 each tick
+	let regenFlag = 0; // DAT_3463_0175 — toggles only when tickParity!=0 → pattern: 1,1,0,0,1,1,0,0
 	let paused = false;
 	let matchOver = false;
 	let done = false;
@@ -1080,8 +1081,9 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		// Life counter regen (line 14346-14350)
 		if (s.f8 < s.fa) s.f8++;
 
-		// MP regen: +1 every other tick parity (line 14329-14337)
-		if (tickParity !== 0) {
+		// MP regen: +1 when regenFlag is on (line 14329-14337)
+		// Pattern: ON,ON,OFF,OFF — two-level toggle from 46db/0175
+		if (regenFlag !== 0) {
 			if (s.v20 < s.v1e) s.v20++;
 		}
 
@@ -1090,8 +1092,12 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 		// Only specific decades have handlers:
 		const decade = Math.floor(s.v14 / 10);
 		if (decade === 0) {
-			// Inline idle check (line 14359-14365)
-			// In the original, calls FUN_25f1_2e1b to check special move buffer
+			// Run initiation (line 14359-14364): FUN_25f1_2e1b in the iVar3==0 block.
+			// Must be here (not in handleInput) so the cached decade prevents
+			// the run state handler from also firing on the initiation frame.
+			if (checkTripleTapRun(p) && s.v00 === 0) {
+				s.v14 = 0x5b;
+			}
 		} else if (decade === 1) {
 			// Attack decade 1: FUN_161d_8779 (line 12129)
 			handleFighterAttack(p);
@@ -1454,13 +1460,8 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 			s.v14 = (Math.random() < 0.5 ? 0 : 1) * 10 + 0xb;
 		}
 
-		// Phase 5: Run initiation (line 14359-14364)
-		// If idle and triple-tap detected and grounded, enter run state
-		if (s.v14 < 5 && s.v00 === 0) {
-			if (checkTripleTapRun(p)) {
-				s.v14 = 0x5b;
-			}
-		}
+		// Phase 5: Run initiation moved to updateFighter decade===0 block
+		// (matching C: iVar3 is cached so run handler won't fire same frame)
 
 		// Phase 6: Air kick convert (line 19655-19660)
 		if (s.v14 === 11 && s.v00 < 0) {
@@ -1623,6 +1624,7 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 
 		// ── Step 3: Toggle tick parity (line 19671-19674) ──
 		tickParity = 1 - tickParity;
+		if (tickParity !== 0) regenFlag = 1 - regenFlag;
 
 		// ── Step 4: Per-slot update (line 19677-19701) ──
 		for (let i = 0; i < MAX_SLOTS; i++) {
@@ -1906,6 +1908,16 @@ export async function runFightExe(ctx: GameContext): Promise<void> {
 				"#ff0",
 			);
 		}
+
+		// Debug: P1 mana display
+		const p1mp = slots[0]?.v20 ?? 0;
+		renderer.drawText(
+			`MP: ${p1mp}`,
+			SCREEN_W / 2 - 20,
+			SCREEN_H / 2,
+			"#fff",
+			16,
+		);
 	}
 
 	// ══════════════════════════════════════════════════════════
